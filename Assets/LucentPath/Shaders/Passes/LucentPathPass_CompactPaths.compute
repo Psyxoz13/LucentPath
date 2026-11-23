@@ -1,0 +1,81 @@
+#pragma kernel CSClearPathArgs LUCENT_PATH_KERNEL_INIT_PATH LUCENT_PATH_DXR_MERGED
+#pragma kernel CSCompactPaths LUCENT_PATH_KERNEL_INIT_PATH LUCENT_PATH_DXR_MERGED
+#pragma kernel CSBuildShadeArgs LUCENT_PATH_KERNEL_INIT_PATH LUCENT_PATH_DXR_MERGED
+#pragma only_renderers d3d11 metal vulkan
+#pragma require wavebasic wavevote waveballot wavemath
+
+#include "../LucentPathPassShared.hlsl"
+#include "../LucentPathMaterialTable.hlsl"
+#include "../LucentPathWaveAppend.hlsl"
+
+RWStructuredBuffer<uint> _ActivePathIndices;
+RWStructuredBuffer<uint> _SimplePathIndices;
+RWStructuredBuffer<uint> _ComplexPathIndices;
+RWStructuredBuffer<uint> _DispatchArgs;
+RWStructuredBuffer<GpuStoredHit> _HitGBuffer;
+
+bool PathIsSimpleMaterial(GpuStoredHit stored)
+{
+    uint model = stored.materialModel;
+    if (model == LUCENT_HIT_MATERIAL_CONDUCTOR || model == LUCENT_HIT_MATERIAL_DIELECTRIC || model == LUCENT_HIT_MATERIAL_THIN_DIELECTRIC)
+        return false;
+
+    GpuMaterialRow row = LoadLucentMaterialRow(stored.materialIndex);
+    return (row.layersFlags.w & LUCENT_MATERIAL_ROW_FLAG_COMPLEX) == 0u;
+}
+
+[numthreads(1, 1, 1)]
+void CSClearPathArgs(uint3 id : SV_DispatchThreadID)
+{
+    _DispatchArgs[0] = 0u;
+    _DispatchArgs[1] = 1u;
+    _DispatchArgs[2] = 1u;
+    _DispatchArgs[3] = 0u;
+    _DispatchArgs[4] = 0u;
+}
+
+void WriteShadeBucketArgs(uint count, uint baseIndex)
+{
+    uint groups = (count + 63u) / 64u;
+    uint gx = min(max(groups, 1u), 65535u);
+    uint gy = (groups + gx - 1u) / gx;
+    _DispatchArgs[baseIndex + 0u] = gx;
+    _DispatchArgs[baseIndex + 1u] = max(gy, 1u);
+    _DispatchArgs[baseIndex + 2u] = 1u;
+    _DispatchArgs[baseIndex + 3u] = gx * 64u;
+}
+
+[numthreads(1, 1, 1)]
+void CSBuildShadeArgs(uint3 id : SV_DispatchThreadID)
+{
+    WriteShadeBucketArgs(_DispatchArgs[3], 8u);
+    WriteShadeBucketArgs(_DispatchArgs[4], 12u);
+}
+
+[numthreads(8, 8, 1)]
+void CSCompactPaths(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    uint pathIndex = id.y * (uint)_Width + id.x;
+    uint flags = _PathFlags[pathIndex];
+    if ((flags & PATH_FLAG_ACTIVE) == 0u)
+        return;
+
+    bool isSimple = PathIsSimpleMaterial(_HitGBuffer[pathIndex]);
+    uint slot = LucentWaveAppendSlot(_DispatchArgs, 0u, true);
+    uint simpleSlot = LucentWaveAppendSlot(_DispatchArgs, 3u, isSimple);
+    uint complexSlot = LucentWaveAppendSlot(_DispatchArgs, 4u, isSimple == false);
+
+    _ActivePathIndices[slot] = pathIndex;
+
+    if (isSimple)
+    {
+        _SimplePathIndices[simpleSlot] = pathIndex;
+    }
+    else
+    {
+        _ComplexPathIndices[complexSlot] = pathIndex;
+    }
+}

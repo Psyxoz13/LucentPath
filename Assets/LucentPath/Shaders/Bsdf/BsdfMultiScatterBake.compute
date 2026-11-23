@@ -1,0 +1,178 @@
+#pragma kernel CSBakeDirectionalAlbedo
+#pragma kernel CSBakeAverageAlbedo
+#pragma kernel CSBakeSheenDirectionalAlbedo
+
+#define MS_PI 3.14159265358979323846
+
+RWTexture2D<float> _MsDirectionalAlbedo;
+RWStructuredBuffer<float> _MsAverageAlbedo;
+Texture2D<float> _MsDirectionalAlbedoIn;
+RWTexture2D<float> _MsSheenDirectionalAlbedo;
+
+uint _MsLutResolution;
+uint _MsSampleCount;
+
+uint MsHash(uint x)
+{
+    x ^= 2747636419u;
+    x *= 2654435769u;
+    x ^= x >> 16;
+    x *= 2654435769u;
+    x ^= x >> 16;
+    x *= 2654435769u;
+    return x;
+}
+
+float MsRandom01(inout uint state)
+{
+    state = MsHash(state);
+    return (state & 0x00FFFFFFu) / 16777216.0;
+}
+
+float MsAlphaFromRoughness(float roughness)
+{
+    return max(roughness * roughness, 1e-4);
+}
+
+float3 MsSampleVndf(float3 wo, float alpha, float2 u)
+{
+    float3 woHemi = normalize(float3(alpha * wo.x, alpha * wo.y, wo.z));
+    float lensq = woHemi.x * woHemi.x + woHemi.y * woHemi.y;
+    float3 T1 = lensq > 0.0 ? float3(-woHemi.y, woHemi.x, 0.0) * rsqrt(lensq) : float3(1.0, 0.0, 0.0);
+    float3 T2 = cross(woHemi, T1);
+
+    float r = sqrt(u.x);
+    float phi = 6.28318530718 * u.y;
+    float t1 = r * cos(phi);
+    float t2 = r * sin(phi);
+    float s = 0.5 * (1.0 + woHemi.z);
+    t2 = (1.0 - s) * sqrt(1.0 - t1 * t1) + s * t2;
+
+    float3 nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * woHemi;
+    float3 wm = normalize(float3(alpha * nh.x, alpha * nh.y, max(nh.z, 0.0)));
+    return wm;
+}
+
+[numthreads(8, 8, 1)]
+void CSBakeDirectionalAlbedo(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _MsLutResolution || id.y >= _MsLutResolution)
+        return;
+
+    float cosThetaO = max(((float)id.x + 0.5) / (float)_MsLutResolution, 1e-3);
+    float roughness = max(((float)id.y + 0.5) / (float)_MsLutResolution, 1e-3);
+    float alpha = MsAlphaFromRoughness(roughness);
+    float sinThetaO = sqrt(max(1.0 - cosThetaO * cosThetaO, 0.0));
+    float3 wo = float3(sinThetaO, 0.0, cosThetaO);
+
+    uint sampleCount = max(_MsSampleCount, 1u);
+    uint rngState = MsHash(id.x ^ MsHash(id.y) ^ 0x9E3779B9u);
+    float accum = 0.0;
+    for (uint s = 0u; s < sampleCount; s++)
+    {
+        float2 u = float2(MsRandom01(rngState), MsRandom01(rngState));
+        float3 wm = MsSampleVndf(wo, alpha, u);
+        float3 wi = -wo + 2.0 * dot(wo, wm) * wm;
+        if (wi.z <= 0.0) continue;
+
+        float lambdaO = (-1.0 + sqrt(1.0 + alpha * alpha * (1.0 - wo.z * wo.z) / max(wo.z * wo.z, 1e-6))) * 0.5;
+        float lambdaI = (-1.0 + sqrt(1.0 + alpha * alpha * (1.0 - wi.z * wi.z) / max(wi.z * wi.z, 1e-6))) * 0.5;
+        float G1o = 1.0 / (1.0 + lambdaO);
+        float G2 = 1.0 / (1.0 + lambdaO + lambdaI);
+        accum += G2 / max(G1o, 1e-6);
+    }
+
+    _MsDirectionalAlbedo[id.xy] = accum / (float)sampleCount;
+}
+
+[numthreads(64, 1, 1)]
+void CSBakeAverageAlbedo(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _MsLutResolution)
+        return;
+
+    float accum = 0.0;
+    for (uint i = 0u; i < _MsLutResolution; i++)
+    {
+        float cosThetaO = ((float)i + 0.5) / (float)_MsLutResolution;
+        float e = _MsDirectionalAlbedoIn.Load(int3((int)i, (int)id.x, 0));
+        accum += 2.0 * e * cosThetaO;
+    }
+    _MsAverageAlbedo[id.x] = accum / (float)_MsLutResolution;
+}
+
+float CharlieD(float NoH, float r)
+{
+    float invR = 1.0 / max(r, 1e-3);
+    float cos2h = NoH * NoH;
+    float sin2h = max(1.0 - cos2h, 0.0078125);
+    return (2.0 + invR) * pow(sin2h, invR * 0.5) / (2.0 * MS_PI);
+}
+
+float CharlieLTerm(float x, float r)
+{
+    float oneMinusR = 1.0 - r;
+    float oneMinusR2 = oneMinusR * oneMinusR;
+    float a = lerp(25.3245, 21.5473, oneMinusR2);
+    float b = lerp(3.32435, 3.82987, oneMinusR2);
+    float c = lerp(0.16801, 0.19823, oneMinusR2);
+    float d = lerp(-1.27393, -1.97760, oneMinusR2);
+    float e = lerp(-4.85967, -4.32054, oneMinusR2);
+    return a / (1.0 + b * pow(max(x, 0.0), c)) + d * x + e;
+}
+
+float CharlieLambda(float cosTheta, float r)
+{
+    if (cosTheta < 0.5)
+        return exp(CharlieLTerm(cosTheta, r));
+    return exp(2.0 * CharlieLTerm(0.5, r) - CharlieLTerm(1.0 - cosTheta, r));
+}
+
+float CharlieG(float NoV, float NoL, float r)
+{
+    return 1.0 / (1.0 + CharlieLambda(NoV, r) + CharlieLambda(NoL, r));
+}
+
+[numthreads(8, 8, 1)]
+void CSBakeSheenDirectionalAlbedo(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _MsLutResolution || id.y >= _MsLutResolution)
+        return;
+
+    float cosThetaO = max(((float)id.x + 0.5) / (float)_MsLutResolution, 1e-3);
+    float roughness = clamp(((float)id.y + 0.5) / (float)_MsLutResolution, 0.07, 1.0);
+    float sinThetaO = sqrt(max(1.0 - cosThetaO * cosThetaO, 0.0));
+    float3 wo = float3(sinThetaO, 0.0, cosThetaO);
+
+    uint sampleCount = max(_MsSampleCount, 1u);
+    uint rngState = MsHash(id.x ^ MsHash(id.y) ^ 0xA5F31C7Du);
+    float accum = 0.0;
+    for (uint s = 0u; s < sampleCount; s++)
+    {
+        float u0 = MsRandom01(rngState);
+        float u1 = MsRandom01(rngState);
+        float cosThetaI = sqrt(max(u0, 0.0));
+        float sinThetaI = sqrt(max(1.0 - cosThetaI * cosThetaI, 0.0));
+        float phi = 6.28318530718 * u1;
+        float3 wi = float3(sinThetaI * cos(phi), sinThetaI * sin(phi), cosThetaI);
+        if (wi.z <= 0.0) continue;
+
+        float3 wm = wo + wi;
+        float wmLen = length(wm);
+        if (wmLen <= 1e-6) continue;
+        wm /= wmLen;
+
+        float NoH = max(wm.z, 0.0);
+        float NoV = max(wo.z, 1e-4);
+        float NoL = max(wi.z, 1e-4);
+
+        float D = CharlieD(NoH, roughness);
+        float G = CharlieG(NoV, NoL, roughness);
+        float brdf = D * G / max(4.0 * NoV * NoL, 1e-6);
+
+        float pdf = NoL / MS_PI;
+        accum += brdf * NoL / max(pdf, 1e-6);
+    }
+
+    _MsSheenDirectionalAlbedo[id.xy] = saturate(accum / (float)sampleCount);
+}

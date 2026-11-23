@@ -1,0 +1,137 @@
+#pragma kernel CSReduceLuminance
+#pragma kernel CSBuildCdf
+#pragma kernel CSBuildAlias
+
+TextureCube<float4> _SourceCubemap;
+SamplerState sampler_SourceCubemap;
+
+RWStructuredBuffer<float> _EnvLuminance;
+RWStructuredBuffer<float> _EnvCdf;
+RWStructuredBuffer<float> _EnvTotalLuminance;
+RWStructuredBuffer<float> _EnvAliasProb;
+RWStructuredBuffer<uint> _EnvAliasIndex;
+RWStructuredBuffer<uint> _EnvAliasSmall;
+RWStructuredBuffer<uint> _EnvAliasLarge;
+
+uint _EnvSamplingResolution;
+
+float3 ResolveCubemapDirection(uint face, float u, float v)
+{
+    float a = u * 2.0 - 1.0;
+    float b = v * 2.0 - 1.0;
+    float3 dir;
+    switch (face)
+    {
+        case 0u: dir = float3( 1.0, -b, -a); break;
+        case 1u: dir = float3(-1.0, -b,  a); break;
+        case 2u: dir = float3( a,  1.0,  b); break;
+        case 3u: dir = float3( a, -1.0, -b); break;
+        case 4u: dir = float3( a, -b,  1.0); break;
+        case 5u: dir = float3(-a, -b, -1.0); break;
+        default: dir = float3(0.0, 1.0, 0.0); break;
+    }
+    return normalize(dir);
+}
+
+float ComputeCubemapTexelSolidAngle(float u, float v, uint resolution)
+{
+    float a = u * 2.0 - 1.0;
+    float b = v * 2.0 - 1.0;
+    float texelSize = 2.0 / (float)resolution;
+    float aMinusHalf = a - 0.5 * texelSize;
+    float aPlusHalf  = a + 0.5 * texelSize;
+    float bMinusHalf = b - 0.5 * texelSize;
+    float bPlusHalf  = b + 0.5 * texelSize;
+    float omega1 = atan2(aMinusHalf * bMinusHalf, sqrt(aMinusHalf * aMinusHalf + bMinusHalf * bMinusHalf + 1.0));
+    float omega2 = atan2(aPlusHalf  * bMinusHalf, sqrt(aPlusHalf  * aPlusHalf  + bMinusHalf * bMinusHalf + 1.0));
+    float omega3 = atan2(aMinusHalf * bPlusHalf,  sqrt(aMinusHalf * aMinusHalf + bPlusHalf  * bPlusHalf  + 1.0));
+    float omega4 = atan2(aPlusHalf  * bPlusHalf,  sqrt(aPlusHalf  * aPlusHalf  + bPlusHalf  * bPlusHalf  + 1.0));
+    return max(omega1 - omega2 - omega3 + omega4, 1e-8);
+}
+
+[numthreads(8, 8, 1)]
+void CSReduceLuminance(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _EnvSamplingResolution || id.y >= _EnvSamplingResolution || id.z >= 6u)
+        return;
+
+    float u = ((float)id.x + 0.5) / (float)_EnvSamplingResolution;
+    float v = ((float)id.y + 0.5) / (float)_EnvSamplingResolution;
+    float3 dir = ResolveCubemapDirection(id.z, u, v);
+
+    float3 sampled = _SourceCubemap.SampleLevel(sampler_SourceCubemap, dir, 0).rgb;
+    float luminance = max(dot(sampled, float3(0.2126, 0.7152, 0.0722)), 0.0);
+    float solidAngle = max(ComputeCubemapTexelSolidAngle(u, v, _EnvSamplingResolution), 0.0);
+
+    uint flatIdx = (id.z * _EnvSamplingResolution + id.y) * _EnvSamplingResolution + id.x;
+    _EnvLuminance[flatIdx] = luminance * solidAngle;
+}
+
+[numthreads(1, 1, 1)]
+void CSBuildCdf(uint3 id : SV_DispatchThreadID)
+{
+    uint total = _EnvSamplingResolution * _EnvSamplingResolution * 6u;
+    float accum = 0.0;
+    for (uint i = 0u; i < total; i++)
+    {
+        accum += _EnvLuminance[i];
+        _EnvCdf[i] = accum;
+    }
+    _EnvTotalLuminance[0] = accum;
+}
+
+[numthreads(1, 1, 1)]
+void CSBuildAlias(uint3 id : SV_DispatchThreadID)
+{
+    uint n = _EnvSamplingResolution * _EnvSamplingResolution * 6u;
+    float total = _EnvTotalLuminance[0];
+
+    if (total <= 1e-20)
+    {
+        [loop]
+        for (uint i = 0u; i < n; i++)
+        {
+            _EnvAliasProb[i] = 1.0;
+            _EnvAliasIndex[i] = i;
+        }
+        return;
+    }
+
+    float scale = (float)n / total;
+    uint smallTop = 0u;
+    uint largeTop = 0u;
+
+    [loop]
+    for (uint i = 0u; i < n; i++)
+    {
+        float p = _EnvLuminance[i] * scale;
+        _EnvAliasProb[i] = p;
+        _EnvAliasIndex[i] = i;
+        if (p < 1.0)
+            _EnvAliasSmall[smallTop++] = i;
+        else
+            _EnvAliasLarge[largeTop++] = i;
+    }
+
+    [loop]
+    while (smallTop > 0u && largeTop > 0u)
+    {
+        uint s = _EnvAliasSmall[--smallTop];
+        uint l = _EnvAliasLarge[--largeTop];
+        _EnvAliasIndex[s] = l;
+        float remaining = _EnvAliasProb[l] - (1.0 - _EnvAliasProb[s]);
+        _EnvAliasProb[l] = remaining;
+        if (remaining < 1.0)
+            _EnvAliasSmall[smallTop++] = l;
+        else
+            _EnvAliasLarge[largeTop++] = l;
+    }
+
+    [loop]
+    while (largeTop > 0u)
+        _EnvAliasProb[_EnvAliasLarge[--largeTop]] = 1.0;
+
+    [loop]
+    while (smallTop > 0u)
+        _EnvAliasProb[_EnvAliasSmall[--smallTop]] = 1.0;
+}

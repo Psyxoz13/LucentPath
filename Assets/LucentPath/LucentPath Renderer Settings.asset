@@ -1,0 +1,178 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 88f7aa9b999af7848ae15fa8ba2e10d1, type: 3}
+  m_Name: LucentPath Renderer Settings
+  m_EditorClassIdentifier: 
+  PathTracingRayGenShader: {fileID: 4807578003741378534, guid: 8dccd0c88d170b94db4d57f8e3648cd6, type: 3}
+  ResolveSecondaryGuidesCompute: {fileID: 7200000, guid: 62adbae66bbb4a69840e0672ecf64fcf, type: 3}
+  AccumulateFrameCompute: {fileID: 7200000, guid: a5c0ce11604e4c81879c0036f91633c5, type: 3}
+  PrepareBuffersCompute: {fileID: 7200000, guid: 97246099d13f4884f9c9aec29a08b561, type: 3}
+  AtrousFilterCompute: {fileID: 7200000, guid: 47279e8ebe81f204eb350dc271ef7954, type: 3}
+  ShadeCompute: {fileID: 7200000, guid: 51d672eab24046adbff7d03aa27c95e6, type: 3}
+  CompactPathsCompute: {fileID: 7200000, guid: 4c52501d3f1c424a9a6175e3a1774edc, type: 3}
+  TaaCompute: {fileID: 7200000, guid: aedb3c6bac68f10d40632bf529ebf5a8, type: 3}
+  EnvBuildCdfCompute: {fileID: 7200000, guid: 893d9843ff28d9a41a4b95cb9e8f1d1b, type: 3}
+  BsdfMultiScatterBakeCompute: {fileID: 7200000, guid: 270118bf44a90af4baadd8d212cbb5d6, type: 3}
+  CompositeShader: {fileID: 4800000, guid: d7fa379bcc777e5459726595420f6189, type: 3}
+  BloomShader: {fileID: 4800000, guid: 7d017dfa7245498cadf919d37062e3d6, type: 3}
+  PostSharpenShader: {fileID: 0}
+  DlssSettings:
+    Quality: 0
+    IsSceneViewAllowed: 1
+    IsDisableWhenDebugViewIsEnabled: 1
+    IsFallbackToNativeWhenUnavailable: 1
+    IsNvidiaOptimalSettingsPreferred: 1
+    FallbackRenderScale: 0.6666667
+    MinimumOutputWidth: 640
+    MinimumOutputHeight: 380
+    IsDlssJitterEnabled: 1
+    JitterScaleX: 1
+    JitterScaleY: 1
+    PresetMode: 0
+    ModelPreset: 3
+    QualityPreset: 3
+    BalancedPreset: 3
+    PerformancePreset: 5
+    UltraPerformancePreset: 4
+    DlaaPreset: 3
+    IsWarnWhenPresetIsUnsupported: 1
+    IsHdrInput: 1
+    IsSystemReversedZUsed: 1
+    IsDepthInverted: 1
+    MotionVectorResolution: 1
+    MotionVectorSpace: 0
+    IsMotionVectorsJittered: 0
+    IsAutoMotionVectorApiScale: 1
+    InvertMotionVectorX: 0
+    InvertMotionVectorY: 0
+    MotionVectorScaleX: 1
+    MotionVectorScaleY: 1
+    IsSharpeningEnabled: 1
+    IsNvidiaOptimalSharpnessPreferred: 1
+    SharpnessOverride: 0.01
+    ProjectId: 123
+  StreamlineSettings:
+    IsStreamlineEnabled: 0
+    IsDlssRayReconstructionEnabled: 1
+    IsSceneViewAllowed: 1
+    IsFallbackToUnityDlssOrNative: 1
+    IsWarnWhenUnavailable: 1
+    RuntimeDirectory: Assets/LucentPath/Plugins/x86_64
+    LogDirectory: Logs/Streamline
+    ApplicationId: 0
+    ProjectId: aca5a509-9454-fa24-8809-3ce9c54a853b
+    IsManualHookingUsed: 1
+    IsFrameBasedResourceTaggingUsed: 1
+    IsLoadDownloadedPlugins: 1
+    IsOverTheAirUpdatesAllowed: 1
+    IsColorBuffersHDR: 1
+    IsPackedNormalRoughness: 1
+    IsAlphaUpscalingEnabled: 0
+    PreExposure: 1
+    ExposureScale: 1
+    DlaaPreset: 4
+    QualityPreset: 4
+    BalancedPreset: 4
+    PerformancePreset: 4
+    UltraPerformancePreset: 4
+  PathTracingSettings:
+    SamplesPerPixel: 1
+    SurfaceBounces: 3
+    ReflectionBounces: 4
+    TransmissionBounces: 5
+    RussianRouletteStart: 2
+    IsEnvironmentNee: 1
+    LightNeeRisCandidates: 1
+    IsEmissiveSurfelNee: 1
+    EmissiveSurfelNeeMaxCandidates: 32
+    IsSkyObjectLighting: 1
+    MaxLights: 32
+    MaxInstanceCount: 65536
+    MaxBounceDistance: 100
+    SurfaceBias: 0.001
+    DirectIntensity: 1
+    DebugVisualizationMode: 0
+  TemporalHistorySettings:
+    MaxHistoryLength: 42
+    LowConfidenceSpatialBlend: 0.35
+    GuideMinSignalWeight: 0.001
+    GuidePlanarNormalThreshold: 0.999
+    GuideMaxVirtualProjectionErrorPixels: 1
+    GuideMaxPlaneMotionMeters: 0.001
+    ShadowAntiLagSensitivity: 2
+    ShadowAntiLagWarmup: 0.125
+    ShadowAntiLagRadius: 1
+  TemporalHistoryRejectionSettings:
+    DepthRejectThreshold: 0.35
+    NormalRejectThreshold: 0.85
+    MotionRejectionStrength: 0.3
+    HistoryColorClipSigma: 1
+  TemporalHistoryConfidenceSettings:
+    DepthConfidenceScale: 1
+    NormalConfidencePower: 1
+    ConfidencePower: 1
+    ConfidenceDitherStrength: 1
+  DisocclusionRecoverySettings:
+    SpatialBootstrapRadius: 2
+    SpatialBootstrapDepthRejectThreshold: 0.06
+    SpatialBootstrapNormalThreshold: 0.88
+    SpatialBootstrapDepthPhi: 8
+    SpatialBootstrapNormalPhi: 16
+    HistoryMissSpatialBlend: 0.45
+    BootstrapCompactionThreshold: 0.1
+    SpatialBootstrapLuminancePhi: 10
+    SpatialBootstrapLuminanceFloor: 0.05
+    SpatialBootstrapVarianceCutoff: 0.3
+    SpatialBootstrapVarianceMinBlend: 0.05
+    YoungHistoryFrames: 16
+    YoungHistoryRadius: 4
+    YoungHistoryBlend: 0.6
+    YoungHistoryVarianceBoost: 3
+  ATrousSettings:
+    AtrousIterations: 5
+    SurfaceAtrousIterations: 3
+    ReflectionAtrousIterations: 3
+    TransmissionAtrousIterations: 3
+    AtrousDepthPhi: 10
+    AtrousNormalPhi: 32
+    ReflectionPrePassRadius: 50
+  FireflySuppressionSettings:
+    IndirectClampMultiplierSurface: 3
+    IndirectClampMultiplierReflection: 4
+    IndirectClampMultiplierTransmission: 6
+    IndirectClampHistoryLutSurface: {fileID: 2800000, guid: c4a2ed8cb800ab642affa58d232e1c63, type: 2}
+    IndirectClampHistoryLutReflection: {fileID: 2800000, guid: 3d85753bfa41eee42bfe650fd24d8bc3, type: 2}
+    IndirectClampHistoryLutTransmission: {fileID: 2800000, guid: ab77441de95b52a47b7b07b408a7d2fe, type: 2}
+  RadianceCacheSettings:
+    IsEnabled: 0
+    SlotCountExponent: 20
+    BaseCellSize: 0.05
+    LodScale: 1
+    MinSamples: 16
+    MinDepth: 1
+    CorrectionProbability: 0.05
+    TemporalDecay: 0.95
+    IsDebugView: 0
+  CheckerboardSettings:
+    IsEnabled: 1
+    ReconstructionRadius: 2
+    NeighborNormalThreshold: 0.9
+    NeighborDepthThreshold: 0.1
+    FullRateHistoryFrames: 16
+  TaaSettings:
+    IsEnabled: 1
+    Feedback: 0.95
+  SamplerSettings:
+    BlueNoiseTexture: {fileID: 18700000, guid: 0e9a5c7b5cb7fd84399bb4fbb49480ee, type: 2}
+  SubsurfaceSettings:
+    IsEnabled: 1
+    IndirectIntensity: 1

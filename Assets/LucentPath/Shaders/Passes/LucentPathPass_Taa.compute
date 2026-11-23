@@ -1,0 +1,185 @@
+#pragma kernel CSTaaResolve
+#pragma kernel CSAntiFirefly
+#pragma only_renderers d3d11 metal vulkan
+
+Texture2D<float4> _TaaCurrentColor;
+Texture2D<float4> _TaaPrevColor;
+Texture2D<float4> _TaaMotionGuide;
+RWTexture2D<float4> _TaaOutput;
+SamplerState sampler_TaaPrevColor;
+
+int _Width;
+int _Height;
+int _HasValidHistory;
+float _TaaFeedback;
+
+#define ANTI_FIREFLY_RADIUS 4
+#define ANTI_FIREFLY_SIGMA_SCALE 2.0
+#define ANTI_FIREFLY_GROUP_SIZE 8
+#define ANTI_FIREFLY_TILE_SIZE (ANTI_FIREFLY_GROUP_SIZE + 2 * ANTI_FIREFLY_RADIUS)
+
+Texture2D<float4> _AntiFireflyInput;
+RWTexture2D<float4> _AntiFireflyOutput;
+
+groupshared float _antiFireflyLuma[ANTI_FIREFLY_TILE_SIZE][ANTI_FIREFLY_TILE_SIZE];
+
+float AntiFireflyLuminance(float3 color)
+{
+    return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+}
+
+float3 RgbToYCoCg(float3 c)
+{
+    float y = 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+    float co = 0.5 * c.r - 0.5 * c.b;
+    float cg = -0.25 * c.r + 0.5 * c.g - 0.25 * c.b;
+    return float3(y, co, cg);
+}
+
+float3 YCoCgToRgb(float3 c)
+{
+    float y = c.x;
+    float co = c.y;
+    float cg = c.z;
+    return float3(y + co - cg, y + cg, y - co - cg);
+}
+
+
+float3 ClipToAabb(float3 prev, float3 center, float3 extent)
+{
+    float3 d = prev - center;
+    float3 absD = abs(d) + 1e-6;
+    float3 unitD = absD / extent;
+    float maxUnit = max(max(unitD.x, unitD.y), unitD.z);
+    if (maxUnit <= 1.0)
+        return prev;
+    return center + d / maxUnit;
+}
+
+[numthreads(8, 8, 1)]
+void CSTaaResolve(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    int2 pixel = int2(id.xy);
+    float4 current = _TaaCurrentColor.Load(int3(pixel, 0));
+
+    if (_HasValidHistory == 0)
+    {
+        _TaaOutput[pixel] = current;
+        return;
+    }
+
+    float3 centerColor = RgbToYCoCg(max(current.rgb, 0.0));
+    float3 minColor = centerColor;
+    float3 maxColor = centerColor;
+    float3 sumColor = centerColor;
+    float3 sumColorSq = centerColor * centerColor;
+    float count = 1.0;
+
+    [unroll]
+    for (int y = -1; y <= 1; y++)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; x++)
+        {
+            if (x == 0 && y == 0)
+                continue;
+
+            int2 samplePixel = pixel + int2(x, y);
+            samplePixel = clamp(samplePixel, int2(0, 0), int2(_Width - 1, _Height - 1));
+
+            float3 neighbor = RgbToYCoCg(max(_TaaCurrentColor.Load(int3(samplePixel, 0)).rgb, 0.0));
+            minColor = min(minColor, neighbor);
+            maxColor = max(maxColor, neighbor);
+            sumColor += neighbor;
+            sumColorSq += neighbor * neighbor;
+            count += 1.0;
+        }
+    }
+
+    float invCount = rcp(count);
+    float3 meanColor = sumColor * invCount;
+    float3 sigma = sqrt(max(sumColorSq * invCount - meanColor * meanColor, 0.0));
+    float3 sigmaMin = meanColor - sigma * 1.25;
+    float3 sigmaMax = meanColor + sigma * 1.25;
+    minColor = max(minColor, sigmaMin);
+    maxColor = min(maxColor, sigmaMax);
+
+    float2 motion = _TaaMotionGuide.Load(int3(pixel, 0)).xy;
+    float2 currentUv = (float2(pixel) + 0.5) / float2(_Width, _Height);
+    float2 prevUv = currentUv - motion;
+
+    if (any(prevUv < 0.0) || any(prevUv > 1.0))
+    {
+        _TaaOutput[pixel] = current;
+        return;
+    }
+
+    float4 prev = _TaaPrevColor.SampleLevel(sampler_TaaPrevColor, prevUv, 0);
+    float3 prevYCoCg = RgbToYCoCg(max(prev.rgb, 0.0));
+    float3 centerYCoCg = RgbToYCoCg(max(current.rgb, 0.0));
+    float3 aabbCenter = (minColor + maxColor) * 0.5;
+    float3 aabbExtent = max(maxColor - minColor, 1e-5) * 0.5;
+    float3 clampedYCoCg = ClipToAabb(prevYCoCg, aabbCenter, aabbExtent);
+    float3 clampedRgb = max(YCoCgToRgb(clampedYCoCg), 0.0);
+
+    float motionPixels = length(motion * float2(_Width, _Height));
+    float baseFeedback = saturate(_TaaFeedback);
+    float staticFeedback = max(baseFeedback, 0.985);
+    float feedback = lerp(staticFeedback, baseFeedback, saturate(motionPixels));
+    float3 blended = lerp(current.rgb, clampedRgb, feedback);
+
+    _TaaOutput[pixel] = float4(blended, current.a);
+}
+
+[numthreads(ANTI_FIREFLY_GROUP_SIZE, ANTI_FIREFLY_GROUP_SIZE, 1)]
+void CSAntiFirefly(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+    int2 tileOrigin = int2(groupId.xy) * ANTI_FIREFLY_GROUP_SIZE - ANTI_FIREFLY_RADIUS;
+
+    for (uint tileIndex = groupIndex; tileIndex < ANTI_FIREFLY_TILE_SIZE * ANTI_FIREFLY_TILE_SIZE; tileIndex += ANTI_FIREFLY_GROUP_SIZE * ANTI_FIREFLY_GROUP_SIZE)
+    {
+        int2 local = int2(tileIndex % ANTI_FIREFLY_TILE_SIZE, tileIndex / ANTI_FIREFLY_TILE_SIZE);
+        int2 samplePixel = clamp(tileOrigin + local, int2(0, 0), int2(_Width - 1, _Height - 1));
+        _antiFireflyLuma[local.y][local.x] = AntiFireflyLuminance(_AntiFireflyInput.Load(int3(samplePixel, 0)).rgb);
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
+    int2 pixel = int2(groupId.xy) * ANTI_FIREFLY_GROUP_SIZE + int2(groupThreadId.xy);
+
+    if (pixel.x >= _Width || pixel.y >= _Height)
+        return;
+
+    float4 color = _AntiFireflyInput.Load(int3(pixel, 0));
+    float m1 = 0.0;
+    float m2 = 0.0;
+
+    [unroll]
+    for (int j = -ANTI_FIREFLY_RADIUS; j <= ANTI_FIREFLY_RADIUS; j++)
+    {
+        [unroll]
+        for (int i = -ANTI_FIREFLY_RADIUS; i <= ANTI_FIREFLY_RADIUS; i++)
+        {
+            if (abs(i) <= 1 && abs(j) <= 1)
+                continue;
+
+            float luma = _antiFireflyLuma[groupThreadId.y + ANTI_FIREFLY_RADIUS + j][groupThreadId.x + ANTI_FIREFLY_RADIUS + i];
+            m1 += luma;
+            m2 += luma * luma;
+        }
+    }
+
+    float invNorm = 1.0 / float((ANTI_FIREFLY_RADIUS * 2 + 1) * (ANTI_FIREFLY_RADIUS * 2 + 1) - 9);
+    m1 *= invNorm;
+    m2 *= invNorm;
+
+    float sigma = sqrt(max(m2 - m1 * m1, 0.0)) * ANTI_FIREFLY_SIGMA_SCALE;
+    float luma = AntiFireflyLuminance(color.rgb);
+    float clampedLuma = clamp(luma, m1 - sigma, m1 + sigma);
+
+    color.rgb = luma > 1e-6 ? max(color.rgb, 0.0) * (clampedLuma / luma) : color.rgb;
+    _AntiFireflyOutput[pixel] = color;
+}

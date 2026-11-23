@@ -1,0 +1,173 @@
+#pragma kernel CSPrepareBuffers
+#pragma kernel CSDecayGuidingField
+#pragma only_renderers d3d11 metal vulkan
+
+static const uint GuideDecayStride = 66u;
+static const uint GuideDecayBinCount = 64u;
+
+RWStructuredBuffer<uint> _RadianceCache;
+int _RadianceCacheCapacity;
+float _RadianceCacheDecay;
+
+[numthreads(64, 1, 1)]
+void CSDecayGuidingField(uint3 id : SV_DispatchThreadID)
+{
+    uint slot = id.x;
+    if (slot >= (uint)_RadianceCacheCapacity)
+        return;
+
+    uint base = slot * GuideDecayStride;
+    if (_RadianceCache[base + 0u] == 0u)
+        return;
+
+    uint newCount = (uint)((float)_RadianceCache[base + 1u] * _RadianceCacheDecay);
+    if (newCount == 0u)
+    {
+        _RadianceCache[base + 0u] = 0u;
+        _RadianceCache[base + 1u] = 0u;
+        [unroll]
+        for (uint c = 0u; c < GuideDecayBinCount; ++c)
+            _RadianceCache[base + 2u + c] = 0u;
+        return;
+    }
+
+    _RadianceCache[base + 1u] = newCount;
+    [unroll]
+    for (uint i = 0u; i < GuideDecayBinCount; ++i)
+        _RadianceCache[base + 2u + i] = (uint)((float)_RadianceCache[base + 2u + i] * _RadianceCacheDecay);
+}
+
+Texture2D<float4> _Guide0;
+Texture2D<float4> _Guide1;
+Texture2D<float4> _ReflectionGuide0;
+Texture2D<float4> _ReflectionGuide1;
+Texture2D<float4> _TransmissionGuide0;
+Texture2D<float4> _TransmissionGuide1;
+Texture2D<float4> _MCDlssSurfaceSignal;
+Texture2D<float4> _MCDlssReflectionSignal;
+Texture2D<float4> _MCDlssTransmissionSignal;
+RWTexture2D<float> _MCDlssTransparencyMask;
+RWTexture2D<float> _MCDlssBiasColorMask;
+RWTexture2D<float> _MCPreparedDepth;
+RWTexture2D<float2> _MCPreparedMotionVectors;
+
+int _Width;
+int _Height;
+float4 _MCPreparedViewToClipZ;
+float4 _MCPreparedMotionVectorScale;
+float _MCPreparedSkyDepth;
+int _MCPreparedMotionVectorSpace;
+
+float ViewDepthToDeviceDepth(float viewDepth)
+{
+    if (viewDepth <= 0.0)
+        return _MCPreparedSkyDepth;
+
+    float zView = -viewDepth;
+    float zClip = _MCPreparedViewToClipZ.x * zView + _MCPreparedViewToClipZ.y;
+    float wClip = _MCPreparedViewToClipZ.z * zView + _MCPreparedViewToClipZ.w;
+    return saturate(zClip / max(abs(wClip), 1e-6));
+}
+
+float2 ConvertMotion(float2 uvMotion)
+{
+    if (_MCPreparedMotionVectorSpace == 0)
+        return uvMotion * 2.0 * _MCPreparedMotionVectorScale.xy;
+
+    if (_MCPreparedMotionVectorSpace == 1)
+        return uvMotion * float2(_Width, _Height) * _MCPreparedMotionVectorScale.xy;
+
+    return uvMotion * _MCPreparedMotionVectorScale.xy;
+}
+
+float ComputeDlssLuminance(float3 color)
+{
+    return dot(max(color, 0.0), float3(0.2126, 0.7152, 0.0722));
+}
+
+void SelectDlssGuides(
+    int2 pixel,
+    float4 primaryGuide0,
+    float4 primaryGuide1,
+    out float4 selectedGuide0,
+    out float4 selectedGuide1,
+    out float transparencyMask,
+    out float biasColorMask)
+{
+    float4 surface = _MCDlssSurfaceSignal.Load(int3(pixel, 0));
+    float4 reflection = _MCDlssReflectionSignal.Load(int3(pixel, 0));
+    float4 transmission = _MCDlssTransmissionSignal.Load(int3(pixel, 0));
+
+    float surfaceWeight = ComputeDlssLuminance(surface.rgb);
+    float reflectionWeight = ComputeDlssLuminance(reflection.rgb);
+    float transmissionWeight = ComputeDlssLuminance(transmission.rgb);
+
+    selectedGuide0 = primaryGuide0;
+    selectedGuide1 = primaryGuide1;
+
+    float selectedWeight = surfaceWeight;
+
+    if (reflectionWeight > selectedWeight)
+    {
+        selectedWeight = reflectionWeight;
+        selectedGuide0 = _ReflectionGuide0.Load(int3(pixel, 0));
+        selectedGuide1 = _ReflectionGuide1.Load(int3(pixel, 0));
+    }
+
+    if (transmissionWeight > selectedWeight)
+    {
+        selectedGuide0 = _TransmissionGuide0.Load(int3(pixel, 0));
+        selectedGuide1 = _TransmissionGuide1.Load(int3(pixel, 0));
+    }
+
+    float secondaryWeight = reflectionWeight + transmissionWeight;
+    float totalWeight = max(surfaceWeight + secondaryWeight, 1e-5);
+
+    transparencyMask = saturate(transmission.a);
+    biasColorMask = saturate(secondaryWeight / totalWeight);
+}
+
+bool IsFiniteFloat2(float2 value)
+{
+    uint2 exponentBits = asuint(value) & 0x7F800000u;
+    return all(exponentBits != 0x7F800000u);
+}
+
+[numthreads(8, 8, 1)]
+void CSPrepareBuffers(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    int2 pixel = int2(id.xy);
+    float4 primaryGuide0 = _Guide0.Load(int3(pixel, 0));
+    float4 primaryGuide1 = _Guide1.Load(int3(pixel, 0));
+
+    float4 selectedGuide0;
+    float4 selectedGuide1;
+    float transparencyMask;
+    float biasColorMask;
+
+    SelectDlssGuides(
+        pixel,
+        primaryGuide0,
+        primaryGuide1,
+        selectedGuide0,
+        selectedGuide1,
+        transparencyMask,
+        biasColorMask);
+
+    _MCPreparedDepth[pixel] = ViewDepthToDeviceDepth(selectedGuide0.w);
+
+    float2 motion = -selectedGuide1.xy;
+    if (!IsFiniteFloat2(motion))
+        motion = 0.0;
+
+    float2 preparedMotion = ConvertMotion(motion);
+    if (!IsFiniteFloat2(preparedMotion))
+        preparedMotion = 0.0;
+
+    _MCPreparedMotionVectors[pixel] = preparedMotion;
+    _MCDlssTransparencyMask[pixel] = transparencyMask;
+    _MCDlssBiasColorMask[pixel] = biasColorMask;
+}

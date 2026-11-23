@@ -1,0 +1,102 @@
+#pragma kernel CSShadeNee LUCENT_PATH_SHADE_NEE_ONLY
+#pragma kernel CSShadeAdvance LUCENT_PATH_SHADE_ADVANCE_ONLY
+#pragma multi_compile _ LUCENT_SHADE_SIMPLE
+#pragma require inlineraytracing
+#pragma only_renderers d3d11 metal vulkan
+#define LUCENT_DXR_ONLY 1
+#define LUCENT_PATH_DXR_AVAILABLE 1
+#define LUCENT_PATH_KERNEL_DIRECT_LIGHTING 1
+#define LUCENT_PATH_KERNEL_ADVANCE_PATH 1
+
+#include "Assets/LucentPath/Shaders/LucentPathSurfaceHit.hlsl"
+#include "Assets/LucentPath/Shaders/LucentPathPassShared.hlsl"
+#include "Assets/LucentPath/Shaders/Lighting/PathGuidingField.hlsl"
+#define LUCENT_PATH_GUIDING_DEPOSIT 1
+RWStructuredBuffer<uint> _RadianceCache;
+int _RadianceCacheCapacity;
+int _RadianceCacheEnabled;
+int _RadianceCacheMinSamples;
+int _RadianceCacheMinDepth;
+float _RadianceCacheBaseCellSize;
+float _RadianceCacheLodScale;
+float _RadianceCacheCorrectionProbability;
+int _GuidingDebug;
+#include "Assets/LucentPath/Shaders/LucentPathPass_LightAdvance.hlsl"
+
+StructuredBuffer<GpuStoredHit> _HitGBuffer;
+StructuredBuffer<uint> _ActivePathIndices;
+StructuredBuffer<uint> _DispatchArgs;
+int _UseCompactPaths;
+int _ShadeDispatchStride;
+int _ShadeCountIndex;
+int _ShadeStrideIndex;
+
+bool ResolveShadePath(uint3 id, out uint pathIndex, out uint2 pixel)
+{
+    pathIndex = 0u;
+    pixel = uint2(0u, 0u);
+
+    uint stride = (_UseCompactPaths != 0) ? _DispatchArgs[_ShadeStrideIndex] : (uint)_ShadeDispatchStride;
+    uint linearId = id.y * stride + id.x;
+
+    if (_UseCompactPaths != 0)
+    {
+        if (linearId >= _DispatchArgs[_ShadeCountIndex])
+            return false;
+        pathIndex = _ActivePathIndices[linearId];
+    }
+    else
+    {
+        pathIndex = linearId;
+        if (pathIndex >= (uint)_Width * (uint)_Height)
+            return false;
+    }
+
+    pixel = uint2(pathIndex % (uint)_Width, pathIndex / (uint)_Width);
+    return true;
+}
+
+#if defined(LUCENT_PATH_SHADE_NEE_ONLY)
+[numthreads(64, 1, 1)]
+void CSShadeNee(uint3 id : SV_DispatchThreadID)
+{
+    uint pathIndex;
+    uint2 pixel;
+    if (!ResolveShadePath(id, pathIndex, pixel))
+        return;
+
+    PathState state = UnpackPathState(_PathStates[pathIndex]);
+    if (!IsPathActive(state))
+        return;
+
+    GpuSurfaceHit surfaceHit = UnpackStoredHit(_HitGBuffer[pathIndex]);
+    Hit hit = CreateEmptyHit();
+    hit.didHit = 1u;
+    hit.t = surfaceHit.t;
+
+    LightAdvanceBody(pixel, state, hit, surfaceHit);
+}
+
+#else
+[numthreads(64, 1, 1)]
+void CSShadeAdvance(uint3 id : SV_DispatchThreadID)
+{
+    uint pathIndex;
+    uint2 pixel;
+    if (!ResolveShadePath(id, pathIndex, pixel))
+        return;
+
+    PathState state = UnpackPathState(_PathStates[pathIndex]);
+    if (!IsPathActive(state))
+        return;
+
+    GpuSurfaceHit surfaceHit = UnpackStoredHit(_HitGBuffer[pathIndex]);
+    Hit hit = CreateEmptyHit();
+    hit.didHit = 1u;
+    hit.t = surfaceHit.t;
+
+    LightAdvanceBody(pixel, state, hit, surfaceHit);
+    _PathStates[pathIndex] = PackPathState(state);
+    _PathFlags[pathIndex] = state.flags;
+}
+#endif

@@ -1,0 +1,365 @@
+#pragma kernel CSHistoryFix LUCENT_PATH_KERNEL_HISTORY_FIX
+#pragma kernel CSAtrousFilter LUCENT_PATH_KERNEL_ATROUS_FILTER
+#pragma multi_compile ATROUS_SIGNAL_SURFACE ATROUS_SIGNAL_REFLECTION ATROUS_SIGNAL_TRANSMISSION
+#pragma only_renderers d3d11 metal vulkan
+
+#include "../LucentPathPassShared.hlsl"
+
+#if defined(ATROUS_SIGNAL_REFLECTION)
+    #define ATROUS_SIGNAL_KIND 1
+#elif defined(ATROUS_SIGNAL_TRANSMISSION)
+    #define ATROUS_SIGNAL_KIND 2
+#else
+    #define ATROUS_SIGNAL_KIND 0
+#endif
+
+float AtrousKernelWeight(int index)
+{
+    float weight = 3.0 / 8.0;
+    if (index == 0 || index == 4)
+        weight = 1.0 / 16.0;
+    else if (index == 1 || index == 3)
+        weight = 1.0 / 4.0;
+    return weight;
+}
+
+bool IsSecondarySignalPathKind(float centerKind)
+{
+    if (ATROUS_SIGNAL_KIND == 1)
+        return abs(centerKind - GUIDE_PATH_KIND_SPECULAR) < 0.5;
+
+    if (ATROUS_SIGNAL_KIND == 2)
+        return abs(centerKind - GUIDE_PATH_KIND_TRANSMISSION) < 0.5;
+
+    return true;
+}
+
+bool AtrousSamePathKind(float centerKind, float sampleKind, float expectedKind)
+{
+    return abs(centerKind - expectedKind) < 0.5 &&
+        abs(sampleKind - expectedKind) < 0.5;
+}
+
+float AtrousSurfaceGuideWeight(
+    float4 centerGuide0,
+    float4 centerGuide2,
+    float4 sampleGuide0,
+    float4 sampleGuide2)
+{
+    bool centerSky = IsSkyGuide(centerGuide0);
+    bool sampleSky = IsSkyGuide(sampleGuide0);
+    if (centerSky != sampleSky || !SamePathChain(centerGuide2, sampleGuide2))
+        return 0.0;
+    if (centerSky)
+        return 1.0;
+
+    float centerDepth = max(centerGuide0.w, 1e-4);
+    float sampleDepth = max(sampleGuide0.w, 1e-4);
+    float depthDelta = abs(centerDepth - sampleDepth) / centerDepth;
+    float normalAgreement = saturate(dot(SafeNormalize(centerGuide0.xyz), SafeNormalize(sampleGuide0.xyz)));
+    return exp(-depthDelta * _AtrousDepthPhi) * pow(normalAgreement, _AtrousNormalPhi);
+}
+
+float AtrousReflectionGuideWeight(
+    float4 centerGuide0,
+    float4 centerGuide2,
+    float4 sampleGuide0,
+    float4 sampleGuide2)
+{
+    if (IsSkyGuide(centerGuide0) || IsSkyGuide(sampleGuide0))
+        return 0.0;
+    if (!AtrousSamePathKind(centerGuide2.x, sampleGuide2.x, GUIDE_PATH_KIND_SPECULAR))
+        return 0.0;
+
+    float roughness = saturate(centerGuide2.y);
+    float sampleRoughness = saturate(sampleGuide2.y);
+    float roughnessDelta = abs(roughness - sampleRoughness);
+    float centerDepth = max(centerGuide0.w, 1e-4);
+    float depthDelta = abs(centerDepth - max(sampleGuide0.w, 1e-4)) / centerDepth;
+    float directionAgreement = saturate(dot(SafeNormalize(centerGuide0.xyz), SafeNormalize(sampleGuide0.xyz)));
+    float directionPower = lerp(_AtrousNormalPhi * 2.0, max(_AtrousNormalPhi * 0.25, 1.0), roughness);
+    float depthWeight = exp(-depthDelta * _AtrousDepthPhi * lerp(2.0, 0.5, roughness));
+    float directionWeight = pow(directionAgreement, directionPower);
+    float roughnessWeight = exp(-roughnessDelta * lerp(24.0, 4.0, roughness));
+    return depthWeight * directionWeight * roughnessWeight;
+}
+
+float AtrousTransmissionGuideWeight(
+    float4 centerGuide0,
+    float4 centerGuide1,
+    float4 centerGuide2,
+    float4 centerColor,
+    float4 sampleGuide0,
+    float4 sampleGuide1,
+    float4 sampleGuide2,
+    float4 sampleColor)
+{
+    bool centerSky = IsSkyGuide(centerGuide0);
+    bool sampleSky = IsSkyGuide(sampleGuide0);
+    if (centerSky != sampleSky)
+        return 0.0;
+    if (!AtrousSamePathKind(centerGuide2.x, sampleGuide2.x, GUIDE_PATH_KIND_TRANSMISSION))
+        return 0.0;
+
+    float etaDelta = abs(max(centerGuide2.y, 1.0) - max(sampleGuide2.y, 1.0));
+    float mediumDelta = abs(centerGuide2.z - sampleGuide2.z);
+    if (etaDelta > 0.025 || mediumDelta > 0.5)
+        return 0.0;
+
+    float directionAgreement = saturate(dot(SafeNormalize(centerGuide0.xyz), SafeNormalize(sampleGuide0.xyz)));
+    float alphaDelta = abs(centerColor.a - sampleColor.a);
+    if (centerSky)
+    {
+        // Sky behind glass has no secondary depth or stable surface ID, so spatial support
+        // must be keyed by transmission chain, refracted direction and glass coverage only.
+        // This still hard-rejects sky/object transitions while allowing sky/sky denoising.
+        return pow(directionAgreement, max(_AtrousNormalPhi * 4.0, 8.0)) *
+            exp(-alphaDelta * 16.0);
+    }
+
+    if (centerGuide1.z < 0.0 || sampleGuide1.z < 0.0 || centerGuide1.z != sampleGuide1.z || centerGuide1.w != sampleGuide1.w)
+        return 0.0;
+
+    float centerDepth = max(centerGuide0.w, 1e-4);
+    float depthDelta = abs(centerDepth - max(sampleGuide0.w, 1e-4)) / centerDepth;
+    return exp(-depthDelta * _AtrousDepthPhi * 2.0) *
+        pow(directionAgreement, max(_AtrousNormalPhi, 4.0)) *
+        exp(-alphaDelta * 16.0);
+}
+
+float LoadDenoiserVariance(float4 moments, float4 youngHistorySignal)
+{
+    // YoungHistorySignal.w is prepared during temporal accumulation and already contains
+    // the variance budget that the history-fix and A-trous passes should consume.
+    return max(youngHistorySignal.w, max(moments.w, 0.0));
+}
+
+float ComputeYoungAtrousStrength(float4 youngHistorySignal)
+{
+    return saturate(max(youngHistorySignal.x, youngHistorySignal.z));
+}
+
+float ComputeYoungAtrousRadiusScale(float4 youngHistorySignal)
+{
+    float youngStrength = ComputeYoungAtrousStrength(youngHistorySignal);
+    float youngRadius = max(youngHistorySignal.y, 1.0);
+    return lerp(1.0, youngRadius, youngStrength);
+}
+
+float HistoryFixPrimaryRoughness(uint2 pixel, float4 guide2)
+{
+    if (ATROUS_SIGNAL_KIND == 1)
+        return saturate(guide2.y);
+
+    return saturate(_PrimaryRoughness.Load(int3(pixel, 0)));
+}
+
+float HistoryFixGuideWeight(
+    uint2 centerPixel,
+    uint2 samplePixel,
+    float4 centerGuide0,
+    float4 centerGuide1,
+    float4 centerGuide2,
+    float4 centerColor,
+    float centerHitDistance,
+    float centerRoughness,
+    float4 sampleColor)
+{
+    float4 sampleGuide0 = _Guide0.Load(int3(samplePixel, 0));
+    float4 sampleGuide1 = _Guide1.Load(int3(samplePixel, 0));
+    float4 sampleGuide2 = _Guide2.Load(int3(samplePixel, 0));
+
+    float guideWeight;
+    if (ATROUS_SIGNAL_KIND == 1)
+        guideWeight = AtrousReflectionGuideWeight(centerGuide0, centerGuide2, sampleGuide0, sampleGuide2);
+    else if (ATROUS_SIGNAL_KIND == 2)
+        guideWeight = AtrousTransmissionGuideWeight(centerGuide0, centerGuide1, centerGuide2, centerColor, sampleGuide0, sampleGuide1, sampleGuide2, sampleColor);
+    else
+        guideWeight = AtrousSurfaceGuideWeight(centerGuide0, centerGuide2, sampleGuide0, sampleGuide2);
+
+    if (guideWeight <= 0.0)
+        return 0.0;
+
+    float2 motionDelta = (sampleGuide1.xy - centerGuide1.xy) * float2(_Width, _Height);
+    float motionWeight = exp(-dot(motionDelta, motionDelta) * 0.25);
+
+    float sampleHitDistance = _HistoryFixHitDistance.Load(int3(samplePixel, 0));
+    bool transmissionSky = ATROUS_SIGNAL_KIND == 2 && IsSkyGuide(centerGuide0) && IsSkyGuide(sampleGuide0);
+    float hitDistanceWeight = 1.0;
+    if (!transmissionSky)
+    {
+        float hitDistanceDenom = max(max(abs(centerHitDistance), abs(sampleHitDistance)), 1e-3);
+        hitDistanceWeight = exp(-abs(centerHitDistance - sampleHitDistance) / hitDistanceDenom * lerp(8.0, 2.0, centerRoughness));
+    }
+
+    float sampleRoughness = HistoryFixPrimaryRoughness(samplePixel, sampleGuide2);
+    float roughnessWeight = exp(-abs(centerRoughness - sampleRoughness) * lerp(24.0, 4.0, centerRoughness));
+
+    return guideWeight * motionWeight * hitDistanceWeight * roughnessWeight;
+}
+
+[numthreads(8, 8, 1)]
+void CSHistoryFix(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    uint2 pixel = id.xy;
+    float4 centerColor = _HistoryFixInput.Load(int3(pixel, 0));
+    float4 centerYoungHistorySignal = _YoungHistorySignal.Load(int3(pixel, 0));
+    float historyFixStrength = ComputeYoungAtrousStrength(centerYoungHistorySignal);
+    int radius = clamp((int)ceil(centerYoungHistorySignal.y), 0, 4);
+
+    if (historyFixStrength <= 1e-4 || radius <= 0)
+    {
+        _HistoryFixOutput[pixel] = centerColor;
+        return;
+    }
+
+    float4 centerGuide2 = _Guide2.Load(int3(pixel, 0));
+
+    if (IsSecondarySignalPathKind(centerGuide2.x) == false)
+    {
+        _HistoryFixOutput[pixel] = centerColor;
+        return;
+    }
+
+    float4 centerGuide0 = _Guide0.Load(int3(pixel, 0));
+    float4 centerGuide1 = _Guide1.Load(int3(pixel, 0));
+    float centerHitDistance = _HistoryFixHitDistance.Load(int3(pixel, 0));
+    float centerRoughness = HistoryFixPrimaryRoughness(pixel, centerGuide2);
+    float centerLuminance = ComputeLuminance(centerColor.rgb);
+    float4 centerMoments = _Moments.Load(int3(pixel, 0));
+    float varianceSigma = sqrt(LoadDenoiserVariance(centerMoments, centerYoungHistorySignal) + 1e-5);
+
+    float4 sum = centerColor;
+    float weightSum = 1.0;
+
+    [loop]
+    for (int y = -radius; y <= radius; y++)
+    {
+        [loop]
+        for (int x = -radius; x <= radius; x++)
+        {
+            if (x == 0 && y == 0)
+                continue;
+
+            int2 samplePixelInt = int2(pixel) + int2(x, y);
+            if (samplePixelInt.x < 0 || samplePixelInt.y < 0 || samplePixelInt.x >= _Width || samplePixelInt.y >= _Height)
+                continue;
+
+            uint2 samplePixel = uint2(samplePixelInt);
+            float4 sampleColor = _HistoryFixInput.Load(int3(samplePixel, 0));
+            float guideWeight = HistoryFixGuideWeight(
+                pixel,
+                samplePixel,
+                centerGuide0,
+                centerGuide1,
+                centerGuide2,
+                centerColor,
+                centerHitDistance,
+                centerRoughness,
+                sampleColor);
+            if (guideWeight <= 1e-5)
+                continue;
+
+            float spatialDistance = length(float2(x, y)) / max((float)radius, 1.0);
+            float spatialWeight = exp(-spatialDistance * spatialDistance * 2.0);
+            float luminanceDelta = abs(ComputeLuminance(sampleColor.rgb) - centerLuminance);
+            float luminanceWeight = exp(-luminanceDelta / max(4.0 * varianceSigma, 1e-3));
+            float weight = guideWeight * spatialWeight * lerp(luminanceWeight, 1.0, historyFixStrength);
+
+            sum += sampleColor * weight;
+            weightSum += weight;
+        }
+    }
+
+    float4 reconstructed = sum / max(weightSum, 1e-5);
+    reconstructed.a = centerColor.a;
+    _HistoryFixOutput[pixel] = lerp(centerColor, reconstructed, saturate(historyFixStrength));
+}
+
+[numthreads(8, 8, 1)]
+void CSAtrousFilter(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    uint2 pixel = id.xy;
+    float4 centerColor = _AtrousInput.Load(int3(pixel, 0));
+    float4 centerGuide0 = _Guide0.Load(int3(pixel, 0));
+
+    if (ATROUS_SIGNAL_KIND != 2 && IsSkyGuide(centerGuide0))
+    {
+        _AtrousOutput[pixel] = centerColor;
+        return;
+    }
+
+    float4 centerGuide2 = _Guide2.Load(int3(pixel, 0));
+
+    if (IsSecondarySignalPathKind(centerGuide2.x) == false)
+    {
+        _AtrousOutput[pixel] = centerColor;
+        return;
+    }
+
+    float4 centerGuide1 = (float4)0.0;
+    if (ATROUS_SIGNAL_KIND == 2)
+        centerGuide1 = _Guide1.Load(int3(pixel, 0));
+    float4 centerMoments = _Moments.Load(int3(pixel, 0));
+    float4 centerYoungHistorySignal = _YoungHistorySignal.Load(int3(pixel, 0));
+
+    float centerLuminance = ComputeLuminance(centerColor.rgb);
+    float varianceSigma = sqrt(LoadDenoiserVariance(centerMoments, centerYoungHistorySignal) + 1e-5);
+    float youngRadiusScale = ComputeYoungAtrousRadiusScale(centerYoungHistorySignal);
+    static const float kLuminanceSigmaScale = 4.0;
+
+    float4 sum = centerColor;
+    float weightSum = 1.0;
+    int step = max(_AtrousStepSize, 1);
+
+    [unroll]
+    for (int ky = 0; ky < 5; ky++)
+    {
+        [unroll]
+        for (int kx = 0; kx < 5; kx++)
+        {
+            if (kx == 2 && ky == 2)
+                continue;
+
+            int2 offset = int2(kx - 2, ky - 2) * step;
+            int2 samplePixel = int2(pixel) + offset;
+            if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= _Width || samplePixel.y >= _Height)
+                continue;
+
+            float4 sampleGuide0 = _Guide0.Load(int3(samplePixel, 0));
+            float4 sampleGuide2 = _Guide2.Load(int3(samplePixel, 0));
+            float4 sampleColor = _AtrousInput.Load(int3(samplePixel, 0));
+
+            float weight = AtrousKernelWeight(kx) * AtrousKernelWeight(ky);
+            if (ATROUS_SIGNAL_KIND == 1)
+                weight *= AtrousReflectionGuideWeight(centerGuide0, centerGuide2, sampleGuide0, sampleGuide2);
+            else if (ATROUS_SIGNAL_KIND == 2)
+            {
+                float4 sampleGuide1 = _Guide1.Load(int3(samplePixel, 0));
+                weight *= AtrousTransmissionGuideWeight(centerGuide0, centerGuide1, centerGuide2, centerColor, sampleGuide0, sampleGuide1, sampleGuide2, sampleColor);
+            }
+            else
+                weight *= AtrousSurfaceGuideWeight(centerGuide0, centerGuide2, sampleGuide0, sampleGuide2);
+            if (weight <= 0.0)
+                continue;
+
+            weight *= youngRadiusScale;
+
+            float colorDelta = abs(ComputeLuminance(sampleColor.rgb) - centerLuminance) / max(kLuminanceSigmaScale * varianceSigma * youngRadiusScale, 1e-3);
+            weight *= exp(-colorDelta);
+
+            sum += sampleColor * weight;
+            weightSum += weight;
+        }
+    }
+
+    float4 filteredColor = sum / max(weightSum, 1e-5);
+    filteredColor.a = centerColor.a;
+    _AtrousOutput[pixel] = filteredColor;
+}

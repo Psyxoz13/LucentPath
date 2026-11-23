@@ -1,0 +1,348 @@
+#pragma kernel CSAccumulateFrame LUCENT_PATH_KERNEL_ACCUMULATE_FRAME LUCENT_ACCUMULATE_SURFACE
+#pragma kernel CSAccumulateFrameSpecular LUCENT_PATH_KERNEL_ACCUMULATE_FRAME LUCENT_ACCUMULATE_SPECULAR
+#pragma kernel CSAccumulateSecondary LUCENT_PATH_KERNEL_ACCUMULATE_FRAME LUCENT_ACCUMULATE_SPECULAR
+#pragma kernel CSReflectionPrePass LUCENT_PATH_KERNEL_ACCUMULATE_FRAME LUCENT_ACCUMULATE_PRE_PASS
+#pragma kernel CSClearBootstrapArgs LUCENT_PATH_KERNEL_ACCUMULATE_FRAME
+#pragma kernel CSFinalizeBootstrapArgs LUCENT_PATH_KERNEL_ACCUMULATE_FRAME
+#pragma kernel CSBootstrapSurface LUCENT_PATH_KERNEL_ACCUMULATE_FRAME LUCENT_ACCUMULATE_SURFACE
+#pragma kernel CSClearSecondaryArgs LUCENT_PATH_KERNEL_COMPACT_SECONDARY
+#pragma kernel CSCompactSecondary LUCENT_PATH_KERNEL_COMPACT_SECONDARY
+#pragma kernel CSFinalizeSecondaryArgs LUCENT_PATH_KERNEL_COMPACT_SECONDARY
+#pragma kernel CSBuildLightingAliases LUCENT_PATH_KERNEL_BUILD_LIGHTING_ALIASES
+#pragma kernel CSCheckerboardResolve LUCENT_PATH_KERNEL_CHECKERBOARD_RESOLVE
+#pragma only_renderers d3d11 metal vulkan
+#pragma require wavebasic wavevote waveballot wavemath
+
+#include "../LucentPathWaveAppend.hlsl"
+
+#define LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE 64
+
+void WriteTemporalDispatchArgs(RWStructuredBuffer<uint> args, uint offset, uint count)
+{
+    uint groupCount = (count + LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE - 1u) / LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE;
+    uint groupsY = max((groupCount + 65534u) / 65535u, 1u);
+    args[offset] = (groupCount + groupsY - 1u) / groupsY;
+    args[offset + 1u] = groupsY;
+    args[offset + 2u] = 1u;
+}
+
+#if defined(LUCENT_PATH_KERNEL_ACCUMULATE_FRAME)
+#include "../LucentPathPassShared.hlsl"
+#include "../LucentPathCheckerboard.hlsl"
+#include "../LucentPathPass_AccumulateFrame.hlsl"
+#endif
+
+#if defined(LUCENT_PATH_KERNEL_COMPACT_SECONDARY)
+Texture2D<float4> _ReflectionGuide1;
+Texture2D<float4> _TransmissionGuide1;
+RWStructuredBuffer<uint> _ActiveSecondaryIndices;
+RWStructuredBuffer<uint> _SecondaryDispatchArgs;
+int _Width;
+int _Height;
+
+[numthreads(1, 1, 1)]
+void CSClearSecondaryArgs(uint3 id : SV_DispatchThreadID)
+{
+    _SecondaryDispatchArgs[3] = 0u;
+}
+
+[numthreads(8, 8, 1)]
+void CSCompactSecondary(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    float reflectionId = _ReflectionGuide1.Load(int3(id.xy, 0)).z;
+    float transmissionId = _TransmissionGuide1.Load(int3(id.xy, 0)).z;
+    if (reflectionId < 0.0 && transmissionId < 0.0)
+        return;
+
+    uint slot = LucentWaveAppendSlot(_SecondaryDispatchArgs, 3u, true);
+    _ActiveSecondaryIndices[slot] = id.y * (uint)_Width + id.x;
+}
+
+[numthreads(1, 1, 1)]
+void CSFinalizeSecondaryArgs(uint3 id : SV_DispatchThreadID)
+{
+    WriteTemporalDispatchArgs(_SecondaryDispatchArgs, 0u, _SecondaryDispatchArgs[3]);
+}
+#endif
+
+#if defined(LUCENT_PATH_KERNEL_BUILD_LIGHTING_ALIASES)
+Texture2D<float4> _AliasSurfaceSignal;
+Texture2D<float4> _AliasReflectionSignal;
+Texture2D<float4> _AliasTransmissionSignal;
+Texture2D<float4> _PrimaryDiffuseAlbedo;
+Texture2D<float4> _PrimarySpecularF0;
+Texture2D<float4> _PrimaryTransmissionTint;
+Texture2D<float4> _FrameEmissionSum;
+Texture2D<float4> _FrameShadowSum;
+Texture2D<float4> _SurfaceMoments;
+Texture2D<float4> _ReflectionMoments;
+Texture2D<float4> _TransmissionMoments;
+Texture2D<float4> _FrameSurfaceSignalSum;
+RWTexture2D<float4> _DirectLighting;
+RWTexture2D<float4> _IndirectLighting;
+RWTexture2D<float> _HitMask;
+RWTexture2D<float4> _CompositeOutput;
+
+int _Width;
+int _Height;
+int _SamplesPerPixel;
+int _DebugVisualizationMode;
+
+static const int LUCENT_PATH_DEBUG_NONE = 0;
+static const int LUCENT_PATH_DEBUG_SURFACE_SIGNAL = 1;
+static const int LUCENT_PATH_DEBUG_REFLECTION_SIGNAL = 2;
+static const int LUCENT_PATH_DEBUG_TRANSMISSION_SIGNAL = 3;
+static const int LUCENT_PATH_DEBUG_SHADOW_SIGNAL = 4;
+static const int LUCENT_PATH_DEBUG_DEMOD_DIFFUSE = 5;
+static const int LUCENT_PATH_DEBUG_DEMOD_SPECULAR = 6;
+static const int LUCENT_PATH_DEBUG_DEMOD_TRANSMISSION = 7;
+static const int LUCENT_PATH_DEBUG_PRIMARY_ALBEDO = 8;
+static const int LUCENT_PATH_DEBUG_PRIMARY_SPECULAR_F0 = 9;
+static const int LUCENT_PATH_DEBUG_PRIMARY_TRANSMISSION_TINT = 10;
+static const int LUCENT_PATH_DEBUG_SURFACE_VARIANCE = 11;
+static const int LUCENT_PATH_DEBUG_REFLECTION_VARIANCE = 12;
+static const int LUCENT_PATH_DEBUG_TRANSMISSION_VARIANCE = 13;
+static const int LUCENT_PATH_DEBUG_FIREFLY_HEATMAP = 14;
+static const int LUCENT_PATH_DEBUG_RAW_SURFACE_FRAME = 15;
+
+float DebugRelativeVariance(float4 moments)
+{
+    return max(moments.w, 0.0) / (moments.x * moments.x + 1e-4);
+}
+
+float3 DebugHeatColor(float t)
+{
+    t = saturate(t);
+    return saturate(float3(1.5 - abs(4.0 * t - 3.0), 1.5 - abs(4.0 * t - 2.0), 1.5 - abs(4.0 * t - 1.0)));
+}
+
+bool ResolveVarianceDebug(uint2 pixel, out float4 outColor)
+{
+    outColor = float4(0.0, 0.0, 0.0, 1.0);
+    if (_DebugVisualizationMode < LUCENT_PATH_DEBUG_SURFACE_VARIANCE)
+        return false;
+
+    float surfaceVariance = DebugRelativeVariance(_SurfaceMoments.Load(int3(pixel, 0)));
+    float reflectionVariance = DebugRelativeVariance(_ReflectionMoments.Load(int3(pixel, 0)));
+    float transmissionVariance = DebugRelativeVariance(_TransmissionMoments.Load(int3(pixel, 0)));
+
+    float value;
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_SURFACE_VARIANCE)
+        value = surfaceVariance;
+    else if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_REFLECTION_VARIANCE)
+        value = reflectionVariance;
+    else if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_TRANSMISSION_VARIANCE)
+        value = transmissionVariance;
+    else
+        value = max(surfaceVariance, max(reflectionVariance, transmissionVariance));
+
+    outColor = float4(DebugHeatColor(value / (value + 1.0)), 1.0);
+    return true;
+}
+
+float4 ResolveDebugVisualization(
+    uint2 pixel,
+    float4 surface,
+    float4 reflection,
+    float4 transmission,
+    float3 diffuseDemod,
+    float3 specularDemod,
+    float3 transmissionDemod,
+    float3 diffuseAlbedo,
+    float3 specularF0,
+    float3 transmissionTint,
+    float shadowFraction,
+    float4 fallbackColor)
+{
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_SURFACE_SIGNAL)
+        return float4(surface.rgb, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_REFLECTION_SIGNAL)
+        return float4(reflection.rgb, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_TRANSMISSION_SIGNAL)
+        return float4(transmission.rgb, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_SHADOW_SIGNAL)
+        return float4(shadowFraction.xxx, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_DEMOD_DIFFUSE)
+        return float4(diffuseDemod, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_DEMOD_SPECULAR)
+        return float4(specularDemod, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_DEMOD_TRANSMISSION)
+        return float4(transmissionDemod, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_PRIMARY_ALBEDO)
+        return float4(diffuseAlbedo, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_PRIMARY_SPECULAR_F0)
+        return float4(specularF0, 1.0);
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_PRIMARY_TRANSMISSION_TINT)
+        return float4(transmissionTint, 1.0);
+
+    return fallbackColor;
+}
+
+[numthreads(8, 8, 1)]
+void CSBuildLightingAliases(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    uint2 pixel = id.xy;
+    float4 surface = _AliasSurfaceSignal.Load(int3(pixel, 0));
+    float4 reflection = _AliasReflectionSignal.Load(int3(pixel, 0));
+    float4 transmission = _AliasTransmissionSignal.Load(int3(pixel, 0));
+
+    float3 diffuseAlbedo = _PrimaryDiffuseAlbedo.Load(int3(pixel, 0)).rgb;
+    float3 specularF0 = _PrimarySpecularF0.Load(int3(pixel, 0)).rgb;
+    float3 transmissionTint = _PrimaryTransmissionTint.Load(int3(pixel, 0)).rgb;
+    float invSpp = rcp(max((float)_SamplesPerPixel, 1.0));
+
+    float3 diffuseDemod = diffuseAlbedo;
+    float3 specularDemod = specularF0;
+    float3 transmissionDemod = transmissionTint;
+
+    surface.rgb = surface.rgb * diffuseDemod;
+    reflection.rgb = reflection.rgb * specularDemod;
+    transmission.rgb = transmission.rgb * transmissionDemod;
+
+    float indirectAlpha = max(reflection.a, transmission.a);
+    float4 indirect = float4(reflection.rgb + transmission.rgb, indirectAlpha);
+
+    float3 finalRgb = surface.rgb + indirect.rgb;
+    float shadowFraction = saturate(_FrameShadowSum.Load(int3(pixel, 0)).r * invSpp);
+    float4 composite = float4(finalRgb, max(surface.a, indirectAlpha));
+    composite = ResolveDebugVisualization(
+        pixel,
+        surface,
+        reflection,
+        transmission,
+        diffuseDemod,
+        specularDemod,
+        transmissionDemod,
+        diffuseAlbedo,
+        specularF0,
+        transmissionTint,
+        shadowFraction,
+        composite);
+
+    float4 varianceDebug;
+    if (ResolveVarianceDebug(pixel, varianceDebug))
+        composite = varianceDebug;
+
+    if (_DebugVisualizationMode == LUCENT_PATH_DEBUG_RAW_SURFACE_FRAME)
+    {
+        float3 rawFrameSurface = _FrameSurfaceSignalSum.Load(int3(pixel, 0)).rgb * invSpp * max(diffuseAlbedo, float3(0.01, 0.01, 0.01));
+        composite = float4(rawFrameSurface, 1.0);
+    }
+
+    _DirectLighting[pixel] = surface;
+    _IndirectLighting[pixel] = indirect;
+    _HitMask[pixel] = surface.a;
+    _CompositeOutput[pixel] = composite;
+}
+#endif
+
+#if defined(LUCENT_PATH_KERNEL_CHECKERBOARD_RESOLVE)
+#include "../LucentPathCheckerboard.hlsl"
+
+RWTexture2D<float4> _FrameSurfaceSignalSum;
+RWTexture2D<float4> _FrameReflectionSignalSum;
+RWTexture2D<float4> _FrameTransmissionSignalSum;
+RWTexture2D<float4> _FrameShadowSum;
+RWTexture2D<float4> _FrameEmissionSum;
+Texture2D<float4> _Guide0;
+Texture2D<float4> _Guide1;
+Texture2D<float4> _Guide2;
+
+int _Width;
+int _Height;
+int _CheckerboardReconstructionRadius;
+float _CheckerboardNeighborNormalThreshold;
+float _CheckerboardNeighborDepthThreshold;
+
+bool CheckerboardResolveNeighborValid(float4 centerGuide0, float4 centerGuide1, float4 sampleGuide0, float4 sampleGuide1)
+{
+    if (centerGuide1.z != sampleGuide1.z)
+        return false;
+
+    float normalAgreement = dot(normalize(centerGuide0.xyz), normalize(sampleGuide0.xyz));
+    if (normalAgreement < _CheckerboardNeighborNormalThreshold)
+        return false;
+
+    float centerDepth = max(centerGuide0.w, 1e-4);
+    float sampleDepth = max(sampleGuide0.w, 1e-4);
+    if (abs(centerDepth - sampleDepth) / centerDepth > _CheckerboardNeighborDepthThreshold)
+        return false;
+
+    return true;
+}
+
+[numthreads(8, 8, 1)]
+void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
+{
+    if (_EnableCheckerboard == 0)
+        return;
+
+    uint2 pixel = uint2(id.x * 2u + ((id.y + (uint)_FrameParity + 1u) & 1u), id.y);
+    if (pixel.x >= (uint)_Width || pixel.y >= (uint)_Height)
+        return;
+
+    if (IsCheckerboardHistoryYoung(pixel))
+    {
+        return;
+    }
+
+    float4 centerGuide0 = _Guide0.Load(int3(pixel, 0));
+    float4 centerGuide1 = _Guide1.Load(int3(pixel, 0));
+
+    float4 surfaceSum = 0.0;
+    float4 reflectionSum = 0.0;
+    float4 transmissionSum = 0.0;
+    float shadowSum = 0.0;
+    float4 emissionSum = 0.0;
+    float weightSum = 0.0;
+
+    int radius = clamp(_CheckerboardReconstructionRadius, 1, 3);
+    [loop]
+    for (int y = -radius; y <= radius; y++)
+    {
+        [loop]
+        for (int x = -radius; x <= radius; x++)
+        {
+            if (x == 0 && y == 0)
+                continue;
+
+            int2 samplePixel = int2(pixel) + int2(x, y);
+            if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= _Width || samplePixel.y >= _Height)
+                continue;
+
+            if (!CheckerboardShadePixel(uint2(samplePixel)))
+                continue;
+
+            float4 sampleGuide0 = _Guide0.Load(int3(samplePixel, 0));
+            float4 sampleGuide1 = _Guide1.Load(int3(samplePixel, 0));
+            if (!CheckerboardResolveNeighborValid(centerGuide0, centerGuide1, sampleGuide0, sampleGuide1))
+                continue;
+
+            surfaceSum += _FrameSurfaceSignalSum[samplePixel];
+            reflectionSum += _FrameReflectionSignalSum[samplePixel];
+            transmissionSum += _FrameTransmissionSignalSum[samplePixel];
+            shadowSum += _FrameShadowSum[samplePixel].r;
+            emissionSum += _FrameEmissionSum[samplePixel];
+            weightSum += 1.0;
+        }
+    }
+
+    if (weightSum < 1e-5)
+        return;
+
+    float invWeight = 1.0 / weightSum;
+    _FrameSurfaceSignalSum[pixel] = surfaceSum * invWeight;
+    _FrameReflectionSignalSum[pixel] = reflectionSum * invWeight;
+    _FrameTransmissionSignalSum[pixel] = transmissionSum * invWeight;
+    float4 shadowSums = _FrameShadowSum[pixel];
+    shadowSums.r = shadowSum * invWeight;
+    _FrameShadowSum[pixel] = shadowSums;
+    _FrameEmissionSum[pixel] = emissionSum * invWeight;
+}
+#endif

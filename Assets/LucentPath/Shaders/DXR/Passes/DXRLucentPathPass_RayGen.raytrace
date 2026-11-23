@@ -1,0 +1,784 @@
+#pragma raytracing DXRLucentPathPass
+#pragma target 6.5
+#pragma max_recursion_depth 1
+#define LUCENT_DXR_ONLY 1
+#define LUCENT_PATH_DXR_AVAILABLE 1
+#define LUCENT_PATH_KERNEL_DIRECT_LIGHTING 1
+#define LUCENT_PATH_KERNEL_ADVANCE_PATH 1
+#define LUCENT_PATH_SECONDARY_GUIDE_EVENT_WRITE 1
+#define LUCENT_PATH_SHADOW_DIELECTRIC_TRACERAY 1
+#define LUCENT_PATH_DXR_MERGED 1
+
+struct GpuEmissiveSurfel
+{
+    float4 positionPower;
+    float4 normal;
+    float4 emission;
+};
+
+RWStructuredBuffer<GpuEmissiveSurfel> _EmissiveSurfels;
+RWStructuredBuffer<uint> _EmissiveSurfelCounter;
+RWStructuredBuffer<uint> _EmissiveSurfelOccupancy;
+int _EmissiveSurfelCapacity;
+float _SurfelDedupCellSize;
+uint _SurfelDedupResolution;
+#define LUCENT_PATH_SURFEL_STRUCT_DECLARED 1
+#define LUCENT_PATH_SURFEL_DATA_RW 1
+
+#include "Assets/LucentPath/Shaders/LucentPathSurfaceHit.hlsl"
+#include "Assets/LucentPath/Shaders/DXR/DXRLucentPathPayload.hlsl"
+#include "Assets/LucentPath/Shaders/LucentPathPassShared.hlsl"
+#include "Assets/LucentPath/Shaders/LucentPathCheckerboard.hlsl"
+
+RWStructuredBuffer<float> _PathDistances;
+RWTexture2D<float4> _Guide0;
+RWTexture2D<float4> _Guide1;
+RWTexture2D<float4> _Guide2;
+RWTexture2D<float> _PrimaryHitDistance;
+RWTexture2D<float> _PrimaryRoughness;
+RWStructuredBuffer<uint4> _MaterialCache;
+int _MaterialCacheCapacity;
+RWStructuredBuffer<GpuStoredHit> _HitGBuffer;
+RWStructuredBuffer<uint> _ActivePathIndices;
+int _UseCompactPaths;
+int _WritePrimaryGuides;
+int _WritePrimaryGuidesThisDispatch;
+
+void WriteMaterialCache(GpuSurfaceHit surfaceHit, uint geometryIndex)
+{
+    if (_MaterialCacheCapacity <= 0)
+        return;
+
+    uint instanceIndex = _LucentMaterialCacheSlot(surfaceHit.instanceId, geometryIndex, _MaterialCacheCapacity);
+
+    GpuMaterialRow row = LoadLucentMaterialRow(surfaceHit.materialIndex);
+    bool openPbr = (row.layersFlags.w & LUCENT_MATERIAL_ROW_FLAG_OPENPBR) != 0u;
+    uint surfaceMaterialModel = GetSurfaceHitMaterialModel(surfaceHit);
+    bool dielectricKind = surfaceMaterialModel == LUCENT_HIT_MATERIAL_DIELECTRIC || surfaceMaterialModel == LUCENT_HIT_MATERIAL_THIN_DIELECTRIC;
+    float3 transmissionColor = openPbr
+        ? saturate(row.transmissionColorWeight.rgb)
+        : (dielectricKind ? saturate(row.baseColorFactor.rgb) : float3(1.0, 1.0, 1.0));
+    float transmissionWeight = openPbr
+        ? saturate(row.transmissionColorWeight.w)
+        : (dielectricKind ? saturate(row.transmissionColorWeight.w) : 0.0);
+
+    uint4 entry;
+    entry.x = _LucentPackUnorm4x8(float4(transmissionColor, transmissionWeight));
+    entry.y = _LucentPackIor8(ResolveMaterialIor(row.iors.x)) |
+        (_LucentPackIor8(ResolveMaterialIor(row.iors.y)) << 8) |
+        (_LucentPackIor8(ResolveMaterialIor(row.iors.z)) << 16) |
+        (_LucentPackSignedUnorm8(clamp(row.iors.w, -1.0, 1.0)) << 24);
+    entry.z = _LucentPackHalf2(max(row.conductorEtaThinFilmThickness.w, 0.0), max(row.conductorKTransmissionDepth.w, 0.0));
+    entry.w = surfaceHit.flagsMaterial & ~SURFACE_HIT_FLAG_PREV_POSITION_VALID;
+    _MaterialCache[instanceIndex] = entry;
+}
+
+RWStructuredBuffer<uint> _DeltaReflectionPathIndices;
+RWStructuredBuffer<uint> _DeltaReflectionArgs;
+
+void AppendDeltaReflectionPath(uint pathIndex)
+{
+    uint slot;
+    InterlockedAdd(_DeltaReflectionArgs[0], 1u, slot);
+    _DeltaReflectionPathIndices[slot] = pathIndex;
+}
+
+#define LUCENT_PATH_HAS_DXR_FINALIZE 1
+void FinalizePathAtBounceLimit(uint2 pixel, inout PathState state);
+
+#include "Assets/LucentPath/Shaders/Lighting/PathGuidingField.hlsl"
+#define LUCENT_PATH_GUIDING_DEPOSIT 1
+RWStructuredBuffer<uint> _RadianceCache;
+int _RadianceCacheCapacity;
+int _RadianceCacheEnabled;
+int _RadianceCacheMinSamples;
+int _RadianceCacheMinDepth;
+float _RadianceCacheBaseCellSize;
+float _RadianceCacheLodScale;
+float _RadianceCacheCorrectionProbability;
+int _GuidingDebug;
+
+#include "Assets/LucentPath/Shaders/LucentPathPass_LightAdvance.hlsl"
+#include "Assets/LucentPath/Shaders/LucentPathPass_IntersectResolveCommon.hlsl"
+
+RayPayload TraceScene(float3 origin, float3 direction, float tMin, float tMax, uint rayFlags, uint rayType)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = tMin;
+    ray.TMax = tMax;
+
+    RayPayload payload;
+    InitRayPayloadMiss(payload, tMax, rayType);
+
+    TraceRay(
+        _RayTracingAccelerationStructure,
+        rayFlags,
+        0xFF,
+        0,
+        1,
+        0,
+        ray,
+        payload);
+
+    return payload;
+}
+
+Hit CreateHitFromPayload(RayPayload payload)
+{
+    Hit hit = CreateEmptyHit();
+    if (GetRayPayloadHit(payload) == 0u)
+        return hit;
+
+    hit.didHit = 1u;
+    hit.t = GetRayPayloadHitDistance(payload);
+    hit.triIndex = -1;
+    hit.instanceIndex = -1;
+    return hit;
+}
+
+void AppendEmissiveSurfel(SurfaceData surface, uint instanceId)
+{
+    if (_EmissiveSurfelNeeEnabled == 0 || _EmissiveSurfelCapacity <= 0)
+        return;
+
+    float power = dot(surface.emission, float3(0.2126, 0.7152, 0.0722));
+    if (power <= 1e-6)
+        return;
+
+    int3 cellCoord = (int3)floor(surface.position / max(_SurfelDedupCellSize, 1e-4));
+    uint hash = (uint)(cellCoord.x * 73856093) ^ (uint)(cellCoord.y * 19349663) ^ (uint)(cellCoord.z * 83492791);
+    uint cell = hash % _SurfelDedupResolution;
+
+    uint previous;
+    InterlockedCompareExchange(_EmissiveSurfelOccupancy[cell], 0xFFFFFFFFu, 0xFFFFFFFEu, previous);
+    if (previous != 0xFFFFFFFFu)
+        return;
+
+    uint slot;
+    InterlockedAdd(_EmissiveSurfelCounter[0], 1u, slot);
+    if (slot >= (uint)_EmissiveSurfelCapacity)
+        return;
+
+    GpuEmissiveSurfel s;
+    s.positionPower = float4(surface.position, power);
+    s.normal = float4(SafeNormalize(surface.geomNormal, float3(0.0, 1.0, 0.0)), asfloat(instanceId));
+    s.emission = float4(surface.emission, 0.0);
+    _EmissiveSurfels[slot] = s;
+    _EmissiveSurfelOccupancy[cell] = slot;
+}
+
+struct DxrGuideSample
+{
+    float4 guide0;
+    float4 guide1;
+    float4 guide2;
+};
+
+float2 DxrProjectWorldToUv(float3 worldPosition, float4x4 viewProj)
+{
+    float4 clip = mul(viewProj, float4(worldPosition, 1.0));
+    float invW = rcp(max(abs(clip.w), 1e-6));
+    return clip.xy * invW * 0.5 + 0.5;
+}
+
+float3 DxrProjectWorldToUvWithValidity(float3 worldPosition, float4x4 viewProj)
+{
+    float4 clip = mul(viewProj, float4(worldPosition, 1.0));
+    float valid = clip.w > 1e-6 ? 1.0 : 0.0;
+    float invW = rcp(max(abs(clip.w), 1e-6));
+    return float3(clip.xy * invW * 0.5 + 0.5, valid);
+}
+
+float3 DxrProjectDirectionToUvWithValidity(float3 cameraPosition, float3 worldDirection, float4x4 viewProj)
+{
+    float distance = max(_BounceMaxDistance, 10.0);
+    float3 direction = SafeNormalize(worldDirection, float3(0.0, 0.0, 1.0));
+    return DxrProjectWorldToUvWithValidity(cameraPosition + direction * distance, viewProj);
+}
+
+float2 DxrSelectValidProjectedUv(float3 projectedUv)
+{
+    return projectedUv.z > 0.0 ? projectedUv.xy : float2(-1.0, -1.0);
+}
+
+DxrGuideSample DxrMakeSurfaceGuide(float2 currentUv, SurfaceData surface, GpuSurfaceHit surfaceHit)
+{
+    float3 prevWorldPosition = GetSurfaceHitPreviousPositionValid(surfaceHit) ? surfaceHit.prevPosition : surface.position;
+    float2 prevUv = DxrProjectWorldToUv(prevWorldPosition, _PrevViewProjMatrix);
+    float viewDepth = abs(mul(_ViewMatrix, float4(surface.position, 1.0)).z);
+    float prevViewDepth = abs(mul(_PrevViewMatrix, float4(prevWorldPosition, 1.0)).z);
+
+    float primaryTransmissionWeight = SurfaceHasTransmissionSignal(surface) ? saturate(surface.transmissionWeight) : 0.0;
+
+    DxrGuideSample guide;
+    guide.guide0 = float4(SafeNormalize(surface.normal, surface.geomNormal), viewDepth);
+    guide.guide1 = float4(currentUv - prevUv, float(surfaceHit.instanceId), 0.0);
+    guide.guide2 = float4(GUIDE_PATH_KIND_PRIMARY, ResolveMaterialIor(surface.eta), primaryTransmissionWeight, prevViewDepth - viewDepth);
+    return guide;
+}
+
+DxrGuideSample DxrMakeSkyGuide(float2 currentUv, Ray ray)
+{
+    float3 projectedPrevUv = DxrProjectDirectionToUvWithValidity(_PrevCameraWorldPos.xyz, ray.direction, _PrevViewProjMatrix);
+    float2 prevMissUv = DxrSelectValidProjectedUv(projectedPrevUv);
+
+    DxrGuideSample guide;
+    guide.guide0 = float4(-SafeNormalize(ray.direction, float3(0.0, 0.0, 1.0)), -1.0);
+    guide.guide1 = float4(currentUv - prevMissUv, -1.0, 0.0);
+    guide.guide2 = float4(GUIDE_PATH_KIND_PRIMARY, 0.0, 0.0, 0.0);
+    return guide;
+}
+
+void DxrStorePrimaryTransmissionGuideCore(uint2 pixel, Ray guideRay, SurfaceData guideSurface);
+void DxrStorePrimaryReflectionGuide(uint2 pixel, Ray guideRay, SurfaceData guideSurface);
+
+DxrGuideSample DxrEvaluatePrimaryGuide(uint2 pixel, Ray primaryRay, RayPayload primaryPayload, out float primaryHitDistance, out float primaryRoughness, out GpuSurfaceHit primarySurfaceHit, out uint primarySurfaceHitValid)
+{
+    primaryHitDistance = 0.0;
+    primaryRoughness = 1.0;
+    primarySurfaceHit = CreateEmptySurfaceHit();
+    primarySurfaceHitValid = 0u;
+    float2 currentUv = RemoveCameraJitterFromUv((float2(pixel) + 0.5) / float2(_Width, _Height));
+    Ray ray = primaryRay;
+    float accumulatedHitDist = 0.0;
+    int maxSteps = max(_ReflectionBounces, 1);
+
+    DxrGuideSample truePrimaryGuide;
+    bool truePrimaryWritten = false;
+
+    [loop] for (int psrStep = 0; psrStep < maxSteps; psrStep++)
+    {
+        RayPayload payload = primaryPayload;
+
+        if (psrStep > 0)
+        {
+            payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 0u);
+        }
+
+        if (GetRayPayloadHit(payload) == 0u)
+        {
+            primaryHitDistance = accumulatedHitDist;
+            if (truePrimaryWritten)
+                return truePrimaryGuide;
+            return DxrMakeSkyGuide(currentUv, ray);
+        }
+
+        GpuSurfaceHit surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+        SurfaceData surface = GetSurface(surfaceHit, ray);
+        accumulatedHitDist += GetRayPayloadHitDistance(payload);
+
+        if (!truePrimaryWritten)
+        {
+            truePrimaryGuide = DxrMakeSurfaceGuide(currentUv, surface, surfaceHit);
+            primaryRoughness = SurfaceGuideRoughness(surface);
+            primarySurfaceHit = surfaceHit;
+            primarySurfaceHitValid = 1u;
+            truePrimaryWritten = true;
+            _PrimaryHitDistance[pixel] = accumulatedHitDist;
+            DxrStorePrimaryTransmissionGuideCore(pixel, ray, surface);
+            DxrStorePrimaryReflectionGuide(pixel, ray, surface);
+        }
+
+        if (!IsDeltaSurface(surface) || SurfaceHasTransmissionSignal(surface) || psrStep == maxSteps - 1)
+        {
+            primaryHitDistance = accumulatedHitDist;
+            return truePrimaryGuide;
+        }
+
+        float3 wo = SafeNormalize(-ray.direction, surface.normal);
+        float3 nextDir = SafeNormalize(ReflectVector(wo, surface.normal), surface.normal);
+
+        Ray nextRay;
+        nextRay.origin = surface.position + nextDir * _SurfaceBias;
+        nextRay.direction = nextDir;
+        nextRay.maxDistance = _BounceMaxDistance;
+        ray = nextRay;
+    }
+
+    primaryHitDistance = accumulatedHitDist;
+    return truePrimaryGuide;
+}
+
+Ray BuildPrimaryReflectionRay(Ray ray, SurfaceData surface)
+{
+    float3 wo = SafeNormalize(-ray.direction, surface.normal);
+    float3 reflectionDirection = SafeNormalize(ReflectVector(wo, surface.normal), surface.normal);
+    return SpawnRayFromSurface(surface.interaction, reflectionDirection);
+}
+
+void DxrStorePrimaryReflectionGuide(uint2 pixel, Ray guideRay, SurfaceData guideSurface)
+{
+    if (_ReflectionHitDistance[pixel] > 0.0)
+        return;
+
+    if (!BSDFHasReflectionSignal(BuildBSDF(guideSurface)))
+        return;
+
+    PathState guideState = CreateInactivePathState();
+    guideState.guideRoughness = SurfaceGuideRoughness(guideSurface);
+
+    Ray reflectionRay = BuildPrimaryReflectionRay(guideRay, guideSurface);
+    RayPayload reflectionPayload = TraceScene(reflectionRay.origin, reflectionRay.direction, _SurfaceBias, max(reflectionRay.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
+    Hit reflectionHit = CreateHitFromPayload(reflectionPayload);
+    if (reflectionHit.didHit == 0u)
+    {
+        StoreSecondaryTerminalGuideEvent(pixel, PATH_SIGNAL_REFLECTION, reflectionRay, max(reflectionRay.maxDistance, _BounceMaxDistance), 0u, LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY, guideState);
+        return;
+    }
+
+    GpuSurfaceHit reflectionSurfaceHit = UnpackHitPayload(reflectionPayload, reflectionRay.origin, reflectionRay.direction);
+    SurfaceData reflectionSurface = GetSurface(reflectionSurfaceHit, reflectionRay);
+    uint stableId = reflectionSurfaceHit.instanceId;
+    uint historyVersion = 0u;
+    _ReflectionHitDistance[pixel] = max(reflectionHit.t, 1e-4);
+    uint previousPositionValid = GetSurfaceHitPreviousPositionValid(reflectionSurfaceHit) ? 1u : 0u;
+    StoreSecondaryGuideEvent(pixel, PATH_SIGNAL_REFLECTION, reflectionRay, reflectionHit.t, reflectionSurface, stableId, historyVersion, GetSurfaceHitFlags(reflectionSurfaceHit), reflectionSurfaceHit.prevPosition, previousPositionValid, guideState);
+}
+
+void DxrApplyPrimaryReflectionSkySplit(uint2 pixel, Ray ray, SurfaceData surface, inout PathState state)
+{
+    if (state.depth != 0u || !IsPrimaryReflectionSurface(state))
+        return;
+
+    if (IsDeltaDielectricPlaneSplit(surface))
+    {
+        return;
+    }
+
+    Ray reflectionRay = BuildPrimaryReflectionRay(ray, surface);
+    RayPayload reflectionPayload = TraceScene(reflectionRay.origin, reflectionRay.direction, _SurfaceBias, max(reflectionRay.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
+    if (GetRayPayloadHit(reflectionPayload) != 0u)
+        return;
+
+    float3 wo = SafeNormalize(-ray.direction, surface.normal);
+    float primaryReflectionEnvLod = saturate(SurfaceGuideRoughness(surface)) * (float)_EnvironmentMaxMip;
+    AccumulateFrameReflectionSignal(pixel, state, state.throughput * ComputePrimaryReflectionWeight(surface, wo) * EvaluateEnvironmentRadianceLod(reflectionRay.direction, primaryReflectionEnvLod));
+    SetPrimaryReflectionSkySplit(state, true);
+}
+
+void DxrStorePrimaryTransmissionGuideCore(uint2 pixel, Ray guideRay, SurfaceData guideSurface)
+{
+    if (_TransmissionHitDistance[pixel] > 0.0)
+        return;
+
+    if (!SurfaceHasTransmissionSignal(guideSurface))
+        return;
+
+    if (SurfaceHasDeltaTransmission(guideSurface) == false)
+    {
+        AnchorPrimaryTransmissionGuideToSurface(pixel);
+        return;
+    }
+
+    const float primaryVirtualDirectionCosThreshold = 0.9995;
+
+    Ray transmissionRay;
+    if (!BuildPrimaryTransmissionGuideRay(guideRay, guideSurface, transmissionRay))
+        return;
+
+    float accumulatedTransmissionDistance = 0.0;
+    uint transmissionGuideFlags = 0u;
+    [loop]
+    for (int step = 0; step < 16; step++)
+    {
+        RayPayload transmissionPayload = TraceScene(
+            transmissionRay.origin,
+            transmissionRay.direction,
+            _SurfaceBias,
+            max(transmissionRay.maxDistance, EPSILON),
+            RAY_FLAG_NONE,
+            1u);
+        Hit transmissionHit = CreateHitFromPayload(transmissionPayload);
+        if (transmissionHit.didHit == 0u)
+        {
+            float skyDistance = max(transmissionRay.maxDistance, _BounceMaxDistance);
+            uint transmissionReservedFlags = transmissionGuideFlags;
+            float directionAgreement = dot(
+                SafeNormalize(transmissionRay.direction, guideRay.direction),
+                SafeNormalize(guideRay.direction, transmissionRay.direction));
+            if (directionAgreement >= primaryVirtualDirectionCosThreshold)
+                transmissionReservedFlags |= LUCENT_PATH_SECONDARY_GUIDE_RESERVED_PRIMARY_VIRTUAL;
+
+            StorePrimaryTransmissionSkyGuideEvent(
+                pixel,
+                transmissionRay,
+                accumulatedTransmissionDistance + skyDistance,
+                guideSurface.eta,
+                transmissionReservedFlags);
+            return;
+        }
+
+        GpuSurfaceHit transmissionSurfaceHit = UnpackHitPayload(transmissionPayload, transmissionRay.origin, transmissionRay.direction);
+        SurfaceData transmissionSurface = GetSurface(transmissionSurfaceHit, transmissionRay);
+        Ray nextTransmissionRay;
+        if (CanContinuePrimaryTransmissionGuide(transmissionRay, transmissionSurface, nextTransmissionRay))
+        {
+            accumulatedTransmissionDistance += max(transmissionHit.t, 1e-4);
+            transmissionGuideFlags |= LUCENT_PATH_SECONDARY_GUIDE_RESERVED_MULTI_TRANSMISSION;
+            transmissionRay = nextTransmissionRay;
+            continue;
+        }
+
+        uint stableId = transmissionSurfaceHit.instanceId;
+        uint historyVersion = 0u;
+        uint transmissionReservedFlags = transmissionGuideFlags;
+        float directionAgreement = dot(
+            SafeNormalize(transmissionRay.direction, guideRay.direction),
+            SafeNormalize(guideRay.direction, transmissionRay.direction));
+        if (directionAgreement >= primaryVirtualDirectionCosThreshold)
+            transmissionReservedFlags |= LUCENT_PATH_SECONDARY_GUIDE_RESERVED_PRIMARY_VIRTUAL;
+
+        StorePrimaryTransmissionGuideEvent(
+            pixel,
+            transmissionRay,
+            accumulatedTransmissionDistance + max(transmissionHit.t, 1e-4),
+            transmissionSurface.position,
+            transmissionSurfaceHit.prevPosition,
+            GetSurfaceHitPreviousPositionValid(transmissionSurfaceHit) ? 1u : 0u,
+            SafeNormalize(transmissionSurface.normal, transmissionSurface.geomNormal),
+            stableId,
+            historyVersion,
+            GetSurfaceHitFlags(transmissionSurfaceHit),
+            guideSurface.eta,
+            transmissionReservedFlags);
+        return;
+    }
+}
+
+void DxrWritePrimaryGuides(uint2 pixelIndex, Ray primaryRay, RayPayload primaryPayload)
+{
+    float primaryHitDistance;
+    float primaryRoughness;
+    GpuSurfaceHit primarySurfaceHit;
+    uint primarySurfaceHitValid;
+    DxrGuideSample guide = DxrEvaluatePrimaryGuide(pixelIndex, primaryRay, primaryPayload, primaryHitDistance, primaryRoughness, primarySurfaceHit, primarySurfaceHitValid);
+
+    _Guide0[pixelIndex] = guide.guide0;
+    _Guide1[pixelIndex] = guide.guide1;
+    _Guide2[pixelIndex] = guide.guide2;
+    _ShadowGuide0[pixelIndex] = guide.guide0;
+    _ShadowGuide1[pixelIndex] = guide.guide1;
+    _ShadowGuide2[pixelIndex] = float4(GUIDE_PATH_KIND_SHADOW_UNBLOCKED, 0.0, 0.0, 0.0);
+    _PrimaryHitDistance[pixelIndex] = primaryHitDistance;
+    _PrimaryRoughness[pixelIndex] = primaryRoughness;
+}
+
+PathState DxrCreateInitialPathState(uint2 pixelIndex, uint pathIndex)
+{
+    _PathDistances[pathIndex] = 0.0;
+
+    PathSampler cameraSample = CreatePathSampler(pixelIndex, (uint)_CurrentSampleIndex, 0u);
+    Ray ray = GenerateCameraRay(pixelIndex, cameraSample);
+
+    PathState state = CreateInactivePathState();
+    SetPathRay(state, ray);
+    state.throughput = 1.0;
+    state.dielectricTint = 1.0;
+    state.dielectricDepth = 1.0;
+    state.guideRoughness = 1.0;
+    state.depth = 0u;
+    SetPathActive(state, true);
+    return state;
+}
+
+int SelectPathBounceBudget(SurfaceData surface, bool hasTransmission)
+{
+    if (hasTransmission)
+        return _TransmissionBounces;
+    if (surface.conductorWeight > 1e-4)
+        return _ReflectionBounces;
+    return _SurfaceBounces;
+}
+
+void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray ray, RayPayload payload, out Hit hit, out GpuSurfaceHit surfaceHit, bool shadeThisFrame)
+{
+    hit = CreateHitFromPayload(payload);
+    surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+    SurfaceData surface = (SurfaceData)0;
+
+    if (hit.didHit != 0u)
+    {
+        WriteMaterialCache(surfaceHit, GetRayPayloadGeometryIndex(payload));
+        _HitGBuffer[pathIndex] = PackStoredHit(surfaceHit);
+        surface = GetSurface(surfaceHit, ray);
+    }
+
+    if (state.depth == 0u)
+    {
+        if (hit.didHit != 0u)
+            WRITE_PRIMARY_DEMODULATORS(pixelIndex, surface);
+        else
+            WRITE_PRIMARY_SKY_DEMODULATORS(pixelIndex);
+    }
+
+    if (state.depth > 0u && hit.didHit != 0u)
+        _PathDistances[pathIndex] = _PathDistances[pathIndex] + hit.t;
+
+    if (ResolveBsdfSampledAnalyticLightTerminal(pixelIndex, ray, hit, state))
+        return;
+
+    if (ResolveMissTerminal(pixelIndex, ray, hit, state))
+        return;
+
+    if (!ApplyHitVolumeAttenuation(hit, state))
+        return;
+
+    AppendEmissiveSurfel(surface, surfaceHit.instanceId);
+    if (state.depth == 0u)
+    {
+        BSDF primaryBsdf = BuildBSDF(surface);
+        bool primaryHasTransmission = BSDFHasTransmissionSignal(primaryBsdf);
+        SetPrimaryReflectionSurface(state, BSDFHasReflectionSignal(primaryBsdf), SurfaceGuideRoughness(surface));
+        SetPrimaryTransmissionSurface(state, primaryHasTransmission);
+        state.maxBouncesForPath = (uint)max(SelectPathBounceBudget(surface, primaryHasTransmission), 1);
+        DxrApplyPrimaryReflectionSkySplit(pixelIndex, ray, surface, state);
+
+        if (shadeThisFrame && IsDeltaDielectricPlaneSplit(surface))
+        {
+            AppendDeltaReflectionPath(pathIndex);
+        }
+    }
+
+    uint stableId = surfaceHit.instanceId;
+    uint historyVersion = 0u;
+    ResolveSurfaceTerminal(pixelIndex, ray, surface, stableId, historyVersion, GetSurfaceHitFlags(surfaceHit), state);
+
+    if (state.depth >= state.maxBouncesForPath)
+        SetPathActive(state, false);
+
+    if (!shadeThisFrame)
+        SetPathActive(state, false);
+}
+
+void DxrTraceAndResolveBounce(uint2 pixelIndex, uint pathIndex, inout PathState state, out Hit hit, out GpuSurfaceHit surfaceHit)
+{
+    Ray ray = GetPathRay(state);
+    RayPayload payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
+    hit = CreateHitFromPayload(payload);
+    surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+
+    if (hit.didHit != 0u)
+    {
+        WriteMaterialCache(surfaceHit, GetRayPayloadGeometryIndex(payload));
+        _HitGBuffer[pathIndex] = PackStoredHit(surfaceHit);
+    }
+
+    if (hit.didHit != 0u)
+        _PathDistances[pathIndex] = _PathDistances[pathIndex] + hit.t;
+
+    if (ResolveBsdfSampledAnalyticLightTerminal(pixelIndex, ray, hit, state))
+        return;
+
+    if (ResolveMissTerminal(pixelIndex, ray, hit, state))
+        return;
+
+    if (!ApplyHitVolumeAttenuation(hit, state))
+        return;
+
+    SurfaceData surface = GetSurface(surfaceHit, ray);
+    AppendEmissiveSurfel(surface, surfaceHit.instanceId);
+    uint stableId = surfaceHit.instanceId;
+    uint historyVersion = 0u;
+    ResolveSurfaceTerminal(pixelIndex, ray, surface, stableId, historyVersion, GetSurfaceHitFlags(surfaceHit), state);
+
+    if (state.depth >= state.maxBouncesForPath)
+        SetPathActive(state, false);
+}
+
+void StartDeltaReflectionPlanePath(uint2 pixelIndex, uint pathIndex, inout PathState state)
+{
+    Ray ray = GetPathRay(state);
+    RayPayload payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 0u);
+    SetPathActive(state, false);
+    if (GetRayPayloadHit(payload) == 0u)
+    {
+        return;
+    }
+
+    Hit hit = CreateHitFromPayload(payload);
+    GpuSurfaceHit surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+    SurfaceData surface = GetSurface(surfaceHit, ray);
+    if (IsDeltaDielectricPlaneSplit(surface) == false)
+    {
+        return;
+    }
+
+    state.maxBouncesForPath = (uint)max(SelectPathBounceBudget(surface, true), 1);
+    SetPathActive(state, true);
+    LightAdvanceBody(pixelIndex, state, hit, surfaceHit);
+    if (IsPathActive(state) == false)
+    {
+        return;
+    }
+
+    DxrTraceAndResolveBounce(pixelIndex, pathIndex, state, hit, surfaceHit);
+}
+
+void TraceSecondDeltaVertex(uint pathIndex, inout PathState state)
+{
+    Ray ray = GetPathRay(state);
+    RayPayload payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
+    Hit hit = CreateHitFromPayload(payload);
+    float areaLightT;
+    float3 areaLightRadiance;
+    float areaLightPdf;
+    if (hit.didHit == 0u || FindClosestAnalyticAreaLightHit(ray, hit.t, areaLightT, areaLightRadiance, areaLightPdf) || ApplyHitVolumeAttenuation(hit, state) == false)
+    {
+        SetPathActive(state, false);
+        return;
+    }
+
+    GpuSurfaceHit surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+    SurfaceData surface = GetSurface(surfaceHit, ray);
+    if (IsDeltaDielectricPlaneSplit(surface) == false)
+    {
+        SetPathActive(state, false);
+        return;
+    }
+
+    WriteMaterialCache(surfaceHit, GetRayPayloadGeometryIndex(payload));
+    _HitGBuffer[pathIndex] = PackStoredHit(surfaceHit);
+}
+
+void StartSecondDeltaReflectionPlanePath(uint2 pixelIndex, uint pathIndex, inout PathState state)
+{
+    Ray ray = GetPathRay(state);
+    RayPayload payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 0u);
+    SetPathActive(state, false);
+    if (GetRayPayloadHit(payload) == 0u)
+    {
+        return;
+    }
+
+    Hit hit = CreateHitFromPayload(payload);
+    GpuSurfaceHit surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+    SurfaceData surface = GetSurface(surfaceHit, ray);
+    if (IsDeltaDielectricPlaneSplit(surface) == false)
+    {
+        return;
+    }
+
+    state.maxBouncesForPath = (uint)max(SelectPathBounceBudget(surface, true), 1);
+    SetPathActive(state, true);
+    LightAdvanceBody(pixelIndex, state, hit, surfaceHit);
+    if (IsPathActive(state) == false)
+    {
+        return;
+    }
+
+    TraceSecondDeltaVertex(pathIndex, state);
+}
+
+void FinalizePathAtBounceLimit(uint2 pixel, inout PathState state)
+{
+    Ray ray = GetPathRay(state);
+    RayPayload payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
+    Hit hit = CreateHitFromPayload(payload);
+    if (state.depth > 0u && hit.didHit != 0u)
+    {
+        uint pathIndex = GetPathIndex(pixel);
+        _PathDistances[pathIndex] = _PathDistances[pathIndex] + hit.t;
+    }
+
+    if (!ResolveFinalizeSampleBeforeSurface(pixel, ray, hit, state))
+    {
+        GpuSurfaceHit surfaceHit = UnpackHitPayload(payload, ray.origin, ray.direction);
+        SurfaceData surface = GetSurface(surfaceHit, ray);
+        AppendEmissiveSurfel(surface, surfaceHit.instanceId);
+        uint stableId = surfaceHit.instanceId;
+        uint historyVersion = 0u;
+        ResolveSurfaceTerminal(pixel, ray, surface, stableId, historyVersion, GetSurfaceHitFlags(surfaceHit), state);
+    }
+
+    SetPathActive(state, false);
+}
+
+[shader("raygeneration")]
+void RayGenPrimarySample()
+{
+    uint2 pixelIndex = DispatchRaysIndex().xy;
+    if (pixelIndex.x >= (uint)_Width || pixelIndex.y >= (uint)_Height)
+        return;
+
+    uint pathIndex = GetPathIndex(pixelIndex);
+    bool shadeThisFrame = CheckerboardShadePixel(pixelIndex);
+
+    PathState state = DxrCreateInitialPathState(pixelIndex, pathIndex);
+    Ray ray = GetPathRay(state);
+    RayPayload payload = TraceScene(ray.origin, ray.direction, _SurfaceBias, max(ray.maxDistance, EPSILON), RAY_FLAG_NONE, 0u);
+
+    if (_WritePrimaryGuides != 0)
+    {
+        Ray guideRay = GenerateGuideCameraRay(pixelIndex);
+        RayPayload guidePayload = TraceScene(guideRay.origin, guideRay.direction, _SurfaceBias, max(guideRay.maxDistance, EPSILON), RAY_FLAG_NONE, 0u);
+        DxrWritePrimaryGuides(pixelIndex, guideRay, guidePayload);
+    }
+
+    Hit hit;
+    GpuSurfaceHit surfaceHit;
+    DxrResolvePath(pixelIndex, pathIndex, state, ray, payload, hit, surfaceHit, shadeThisFrame);
+    _PathStates[pathIndex] = PackPathState(state);
+    _PathFlags[pathIndex] = state.flags;
+}
+
+[shader("raygeneration")]
+void RayGenDeltaReflectionPlane()
+{
+    uint pathIndex = _DeltaReflectionPathIndices[DispatchRaysIndex().x];
+    uint2 pixelIndex = uint2(pathIndex % (uint)_Width, pathIndex / (uint)_Width);
+
+    PathState state = DxrCreateInitialPathState(pixelIndex, pathIndex);
+    StartDeltaReflectionPlanePath(pixelIndex, pathIndex, state);
+    _PathStates[pathIndex] = PackPathState(state);
+    _PathFlags[pathIndex] = state.flags;
+}
+
+[shader("raygeneration")]
+void RayGenSecondDeltaReflectionPlane()
+{
+    uint pathIndex = _DeltaReflectionPathIndices[DispatchRaysIndex().x];
+    uint2 pixelIndex = uint2(pathIndex % (uint)_Width, pathIndex / (uint)_Width);
+
+    PathState state = DxrCreateInitialPathState(pixelIndex, pathIndex);
+    StartSecondDeltaReflectionPlanePath(pixelIndex, pathIndex, state);
+    _PathStates[pathIndex] = PackPathState(state);
+    _PathFlags[pathIndex] = state.flags;
+}
+
+[shader("raygeneration")]
+void RayGenMain()
+{
+    uint2 pixelIndex;
+    uint pathIndex;
+    if (_UseCompactPaths != 0)
+    {
+        uint linearIndex = DispatchRaysIndex().x;
+        pathIndex = _ActivePathIndices[linearIndex];
+        pixelIndex = uint2(pathIndex % (uint)_Width, pathIndex / (uint)_Width);
+    }
+    else
+    {
+        pixelIndex = DispatchRaysIndex().xy;
+        if (pixelIndex.x >= (uint)_Width || pixelIndex.y >= (uint)_Height)
+            return;
+        pathIndex = GetPathIndex(pixelIndex);
+    }
+
+    PathState state = UnpackPathState(_PathStates[pathIndex]);
+    if (!IsPathActive(state))
+        return;
+
+    Hit hit;
+    GpuSurfaceHit surfaceHit;
+    DxrTraceAndResolveBounce(pixelIndex, pathIndex, state, hit, surfaceHit);
+    _PathStates[pathIndex] = PackPathState(state);
+    _PathFlags[pathIndex] = state.flags;
+}
+
+[shader("miss")]
+void MissMain(inout RayPayload payload : SV_RayPayload)
+{
+    MarkRayPayloadMiss(payload);
+}
