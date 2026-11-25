@@ -170,7 +170,7 @@ Ray GenerateGuideCameraRay(uint2 pixel)
 
 Ray GenerateCameraRay(uint2 pixel, PathSampler pathSample)
 {
-    float2 uv = (float2(pixel) + 0.5) / float2(_Width, _Height);
+    float2 uv = (float2(pixel) + GetCameraJitterSample(pathSample)) / float2(_Width, _Height);
     return ApplyThinLensToCameraRay(GenerateCameraRayFromUv(uv), GetLensUvSample(pathSample));
 }
 

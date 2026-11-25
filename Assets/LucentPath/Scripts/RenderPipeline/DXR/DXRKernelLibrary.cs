@@ -37,6 +37,11 @@ namespace LucentPath.Rendering
 
             _pipelineResources.AccumulateFrame = FindKernel(_pipelineResources.Asset.AccumulateFrameCompute, "Accumulate Frame", "CSAccumulateFrame");
 
+            _pipelineResources.BuildSurfaceFastHistory = FindKernel(
+                _pipelineResources.Asset.AccumulateFrameCompute,
+                "Build Surface Fast History",
+                "CSBuildSurfaceFastHistory");
+
             _pipelineResources.AccumulateFrameSpecular = FindKernel(
                 _pipelineResources.Asset.AccumulateFrameCompute,
                 "Accumulate Frame Specular",
@@ -684,7 +689,7 @@ namespace LucentPath.Rendering
 
                 BindAccumulationTextures(cmd, state, compute, secondaryKernel);
                 cmd.SetComputeBufferParam(compute, secondaryKernel, ActiveSecondaryIndicesProperty, state.ActivePathIndicesBuffer);
-                cmd.SetComputeBufferParam(compute, secondaryKernel, SecondaryDispatchInfoProperty, state.DispatchArgsBuffer);
+                cmd.SetComputeBufferParam(compute, secondaryKernel, SecondaryActiveCountProperty, state.DispatchArgsBuffer);
             }
 
             if (_pipelineResources.BootstrapSurface.Compute != null && state.BootstrapActiveIndicesBuffer != null && state.DispatchArgsBuffer != null)
@@ -718,6 +723,7 @@ namespace LucentPath.Rendering
             cmd.SetComputeTextureParam(compute, kernel, PrimaryDiffuseAlbedoProperty, state.PrimaryDiffuseAlbedo.nameID);
             cmd.SetComputeTextureParam(compute, kernel, PrimarySpecularF0Property, state.PrimarySpecularF0.nameID);
             cmd.SetComputeTextureParam(compute, kernel, PrimaryTransmissionTintProperty, state.PrimaryTransmissionTint.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, Guide1Property, state.SurfaceSignal.Guide1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, FrameEmissionSumProperty, state.FrameEmissionSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, FrameShadowSumUavProperty, state.FrameShadowSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, SurfaceMomentsProperty, state.SurfaceSignal.Moments.nameID);
@@ -781,6 +787,21 @@ namespace LucentPath.Rendering
                 && state.ActivePathIndicesBuffer != null
                 && state.BootstrapActiveIndicesBuffer != null
                 && state.DispatchArgsBuffer != null;
+
+            cmd.SetComputeIntParam(compute, SurfaceFastHistoryLengthProperty, 3);
+            var fastHistoryKernel = _pipelineResources.BuildSurfaceFastHistory.Kernel;
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, FrameSurfaceSignalSumProperty, state.FrameSurfaceSignalSum.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, FrameShadowSumUavProperty, state.FrameShadowSum.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, Guide0Property, state.SurfaceSignal.Guide0.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, Guide1Property, state.SurfaceSignal.Guide1.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, Guide2Property, state.SurfaceSignal.Guide2.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, PrevGuide0Property, state.SurfaceSignal.PrevGuide0.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, PrevGuide1Property, state.SurfaceSignal.PrevGuide1.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, PrevGuide2Property, state.SurfaceSignal.PrevGuide2.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, SurfaceFastHistoryProperty, state.SurfaceFastHistory.nameID);
+            cmd.SetComputeTextureParam(compute, fastHistoryKernel, PrevSurfaceFastHistoryProperty, state.PrevSurfaceFastHistory.nameID);
+            DispatchCompute(cmd, _pipelineResources.BuildSurfaceFastHistory, groupsX, groupsY);
+            cmd.SetComputeTextureParam(compute, _pipelineResources.AccumulateFrame.Kernel, SurfaceFastHistoryProperty, state.SurfaceFastHistory.nameID);
 
             cmd.SetComputeIntParam(compute, UseSecondaryCompactionProperty, compactionActive ? 1 : 0);
             DispatchCompute(cmd, _pipelineResources.ReflectionPrePass, groupsX, groupsY);
@@ -876,6 +897,7 @@ namespace LucentPath.Rendering
             cmd.SetComputeTextureParam(compute, kernel, TaaCurrentColorProperty, current.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaPrevColorProperty, state.PrevResult.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaMotionGuideProperty, state.SurfaceSignal.Guide1.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, TaaPrevSurfaceGuideProperty, state.SurfaceSignal.PrevGuide1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaOutputProperty, output.nameID);
 
             var groupsX = Mathf.CeilToInt(state.Width / 8f);

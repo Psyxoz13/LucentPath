@@ -303,20 +303,29 @@ void CSAtrousFilter(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    float4 centerGuide1 = (float4)0.0;
-    if (ATROUS_SIGNAL_KIND == 2)
-        centerGuide1 = _Guide1.Load(int3(pixel, 0));
     float4 centerMoments = _Moments.Load(int3(pixel, 0));
     float4 centerYoungHistorySignal = _YoungHistorySignal.Load(int3(pixel, 0));
+    float historyAge = max(centerMoments.z - 1.0, 0.0);
+    float youngBlend = _YoungHistoryFrames > 0
+        ? saturate(1.0 - historyAge / (float)_YoungHistoryFrames) : 0.0;
+    bool matchSurfaceOwner = ATROUS_SIGNAL_KIND == 0 && youngBlend > 0.0;
+    float4 centerGuide1 = (float4)0.0;
+    if (ATROUS_SIGNAL_KIND == 2 || matchSurfaceOwner)
+        centerGuide1 = _Guide1.Load(int3(pixel, 0));
 
     float centerLuminance = ComputeLuminance(centerColor.rgb);
     float varianceSigma = sqrt(LoadDenoiserVariance(centerMoments, centerYoungHistorySignal) + 1e-5);
     float youngRadiusScale = ComputeYoungAtrousRadiusScale(centerYoungHistorySignal);
     static const float kLuminanceSigmaScale = 4.0;
 
-    float4 sum = centerColor;
-    float weightSum = 1.0;
+    // Match the center tap to the separable B-spline on fresh history.
+    float kernelCenter = AtrousKernelWeight(2);
+    float centerWeight = lerp(1.0, kernelCenter * kernelCenter, youngBlend);
+    float4 sum = centerColor * centerWeight;
+    float weightSum = centerWeight;
     int step = max(_AtrousStepSize, 1);
+    if (matchSurfaceOwner && step > 1)
+        step += (int)round((float)step * youngBlend);
 
     [unroll]
     for (int ky = 0; ky < 5; ky++)
@@ -330,6 +339,9 @@ void CSAtrousFilter(uint3 id : SV_DispatchThreadID)
             int2 offset = int2(kx - 2, ky - 2) * step;
             int2 samplePixel = int2(pixel) + offset;
             if (samplePixel.x < 0 || samplePixel.y < 0 || samplePixel.x >= _Width || samplePixel.y >= _Height)
+                continue;
+
+            if (matchSurfaceOwner && _Guide1.Load(int3(samplePixel, 0)).z != centerGuide1.z)
                 continue;
 
             float4 sampleGuide0 = _Guide0.Load(int3(samplePixel, 0));

@@ -24,6 +24,7 @@ namespace LucentPath.Rendering
         public static readonly int EnvNeeEnabledProperty = Shader.PropertyToID("_EnvNeeEnabled");
         public static readonly int LightNeeRisCandidatesProperty = Shader.PropertyToID("_LightNeeRisCandidates");
         public static readonly int CheckerboardFullRateHistoryFramesProperty = Shader.PropertyToID("_CheckerboardFullRateHistoryFrames");
+        public static readonly int CheckerboardPromotionPhaseProperty = Shader.PropertyToID("_CheckerboardPromotionPhase");
         public static readonly int CheckerboardHistoryMomentsProperty = Shader.PropertyToID("_CheckerboardHistoryMoments");
         public static readonly int EmissiveSurfelNeeEnabledProperty = Shader.PropertyToID("_EmissiveSurfelNeeEnabled");
         public static readonly int EmissiveSurfelNeeMaxCandidatesProperty = Shader.PropertyToID("_EmissiveSurfelNeeMaxCandidates");
@@ -82,6 +83,9 @@ namespace LucentPath.Rendering
         public static readonly int ReflectionSignalUavProperty = Shader.PropertyToID("_ReflectionSignal");
         public static readonly int TransmissionSignalUavProperty = Shader.PropertyToID("_TransmissionSignal");
         public static readonly int SurfaceYoungHistorySignalProperty = Shader.PropertyToID("_SurfaceYoungHistorySignal");
+        public static readonly int SurfaceFastHistoryProperty = Shader.PropertyToID("_SurfaceFastHistory");
+        public static readonly int SurfaceFastHistoryLengthProperty = Shader.PropertyToID("_SurfaceFastHistoryLength");
+        public static readonly int PrevSurfaceFastHistoryProperty = Shader.PropertyToID("_PrevSurfaceFastHistory");
         public static readonly int ReflectionYoungHistorySignalProperty = Shader.PropertyToID("_ReflectionYoungHistorySignal");
         public static readonly int TransmissionYoungHistorySignalProperty = Shader.PropertyToID("_TransmissionYoungHistorySignal");
         public static readonly int YoungHistorySignalProperty = Shader.PropertyToID("_YoungHistorySignal");
@@ -123,7 +127,7 @@ namespace LucentPath.Rendering
         public static readonly int ShadeDispatchStrideProperty = Shader.PropertyToID("_ShadeDispatchStride");
         public static readonly int UseSecondaryCompactionProperty = Shader.PropertyToID("_UseSecondaryCompaction");
         public static readonly int ActiveSecondaryIndicesProperty = Shader.PropertyToID("_ActiveSecondaryIndices");
-        public static readonly int SecondaryDispatchInfoProperty = Shader.PropertyToID("_SecondaryDispatchInfo");
+        public static readonly int SecondaryActiveCountProperty = Shader.PropertyToID("_SecondaryActiveCount");
         public static readonly int SecondaryDispatchArgsProperty = Shader.PropertyToID("_SecondaryDispatchArgs");
         public static readonly int BootstrapActiveIndicesProperty = Shader.PropertyToID("_BootstrapActiveIndices");
         public static readonly int BootstrapDispatchArgsProperty = Shader.PropertyToID("_BootstrapDispatchArgs");
@@ -144,6 +148,7 @@ namespace LucentPath.Rendering
         public static readonly int TaaCurrentColorProperty = Shader.PropertyToID("_TaaCurrentColor");
         public static readonly int TaaPrevColorProperty = Shader.PropertyToID("_TaaPrevColor");
         public static readonly int TaaMotionGuideProperty = Shader.PropertyToID("_TaaMotionGuide");
+        public static readonly int TaaPrevSurfaceGuideProperty = Shader.PropertyToID("_TaaPrevSurfaceGuide");
         public static readonly int TaaOutputProperty = Shader.PropertyToID("_TaaOutput");
         public static readonly int AntiFireflyInputProperty = Shader.PropertyToID("_AntiFireflyInput");
         public static readonly int AntiFireflyOutputProperty = Shader.PropertyToID("_AntiFireflyOutput");

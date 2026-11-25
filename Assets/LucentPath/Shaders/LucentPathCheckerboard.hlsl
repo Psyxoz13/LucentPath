@@ -4,6 +4,7 @@
 int _EnableCheckerboard;
 int _FrameParity;
 int _CheckerboardFullRateHistoryFrames;
+int _CheckerboardPromotionPhase;
 Texture2D<float4> _CheckerboardHistoryMoments;
 
 bool CheckerboardShadeThisFrame(uint2 pixel, int frameParity)
@@ -24,7 +25,17 @@ bool CheckerboardShadePixel(uint2 pixel)
         return true;
     }
 
-    return CheckerboardShadeThisFrame(pixel, _FrameParity) || IsCheckerboardHistoryYoung(pixel);
+    if (CheckerboardShadeThisFrame(pixel, _FrameParity))
+        return true;
+
+    if (_CheckerboardPromotionPhase > 0)
+    {
+        uint phase = (uint)(_CheckerboardPromotionPhase - 1);
+        if ((((pixel.x >> 1u) + pixel.y + phase) & 3u) != 0u)
+            return false;
+    }
+
+    return IsCheckerboardHistoryYoung(pixel);
 }
 
 #endif

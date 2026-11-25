@@ -271,6 +271,9 @@ DxrGuideSample DxrEvaluatePrimaryGuide(uint2 pixel, Ray primaryRay, RayPayload p
 
         if (!truePrimaryWritten)
         {
+            if (Max3(surface.emission) > 0.0)
+                _FrameEmissionSum[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+
             truePrimaryGuide = DxrMakeSurfaceGuide(currentUv, surface, surfaceHit);
             primaryRoughness = SurfaceGuideRoughness(surface);
             primarySurfaceHit = surfaceHit;
@@ -508,9 +511,15 @@ void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray
     if (state.depth == 0u)
     {
         if (hit.didHit != 0u)
+        {
             WRITE_PRIMARY_DEMODULATORS(pixelIndex, surface);
+            if (Max3(surface.emission) > 0.0)
+                _FrameEmissionSum[pixelIndex] = float4(0.0, 0.0, 0.0, 1.0);
+        }
         else
+        {
             WRITE_PRIMARY_SKY_DEMODULATORS(pixelIndex);
+        }
     }
 
     if (state.depth > 0u && hit.didHit != 0u)
@@ -714,6 +723,18 @@ void RayGenPrimarySample()
         Ray guideRay = GenerateGuideCameraRay(pixelIndex);
         RayPayload guidePayload = TraceScene(guideRay.origin, guideRay.direction, _SurfaceBias, max(guideRay.maxDistance, EPSILON), RAY_FLAG_NONE, 0u);
         DxrWritePrimaryGuides(pixelIndex, guideRay, guidePayload);
+    }
+
+    if (shadeThisFrame)
+    {
+        float sampleOwner = GetRayPayloadHit(payload) != 0u ? float(GetRayPayloadInstanceId(payload)) : -1.0;
+        if (sampleOwner != _Guide1[pixelIndex].z)
+        {
+            // The jittered sample still contributes to AA. It cannot measure the center surface's response.
+            float4 shadowSums = _FrameShadowSum[pixelIndex];
+            shadowSums.a = -1.0;
+            _FrameShadowSum[pixelIndex] = shadowSums;
+        }
     }
 
     Hit hit;

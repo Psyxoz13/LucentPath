@@ -12,7 +12,7 @@ static const uint SIGNAL_GUIDE_SHADOW = 3u;
 int _UseSecondaryCompaction;
 float _BootstrapMissThreshold;
 StructuredBuffer<uint> _ActiveSecondaryIndices;
-StructuredBuffer<uint> _SecondaryDispatchInfo;
+StructuredBuffer<uint> _SecondaryActiveCount;
 StructuredBuffer<uint> _BootstrapDispatchInfo;
 RWStructuredBuffer<uint> _BootstrapActiveIndices;
 RWStructuredBuffer<uint> _BootstrapDispatchArgs;
@@ -808,6 +808,7 @@ bool BilinearReprojectHistory(
     out float4 historySignal,
     out float4 historyMoments,
     out float prevHitMask,
+    out float surfaceOwnerCoverage,
     out float relativeDepthDelta,
     out float normalAgreement,
     out int2 resolvedPrevPixel)
@@ -815,6 +816,7 @@ bool BilinearReprojectHistory(
     historySignal = 0.0;
     historyMoments = 0.0;
     prevHitMask = 0.0;
+    surfaceOwnerCoverage = 0.0;
     relativeDepthDelta = 1.0;
     normalAgreement = 0.0;
 
@@ -848,6 +850,9 @@ bool BilinearReprojectHistory(
         float4 tapGuide1 = LoadPrevGuide1(guideKind, tapPixel);
         float4 tapGuide2 = LoadPrevGuide2(guideKind, tapPixel);
 
+        if (guideKind == SIGNAL_GUIDE_SURFACE && tapGuide1.z == currentGuide1.z)
+            surfaceOwnerCoverage += weight;
+
         float tapRelativeDepthDelta;
         float tapNormalAgreement;
         if (!ValidateHistory(guideKind, currentGuide0, currentGuide1, currentGuide2, tapGuide0, tapGuide1, tapGuide2, tapRelativeDepthDelta, tapNormalAgreement))
@@ -876,6 +881,137 @@ bool BilinearReprojectHistory(
     prevHitMask = hitMaskSum * invWeightSum;
     return true;
 }
+
+int _SurfaceFastHistoryLength;
+
+#if defined(LUCENT_BUILD_SURFACE_FAST_HISTORY)
+
+RWTexture2D<float2> _SurfaceFastHistory;
+Texture2D<float2> _PrevSurfaceFastHistory;
+
+[numthreads(8, 8, 1)]
+void CSBuildSurfaceFastHistory(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Width || id.y >= (uint)_Height)
+        return;
+
+    int2 pixel = int2(id.xy);
+    float3 current = _FrameSurfaceSignalSum.Load(int3(pixel, 0)).rgb / max((float)_SamplesPerPixel, 1.0);
+    float luminance = ComputeLuminance(max(current, 0.0));
+    bool shaded = CheckerboardShadePixel(id.xy);
+    float sampleCoverage = _FrameShadowSum.Load(int3(pixel, 0)).a;
+    bool hasCurrent = shaded ? sampleCoverage >= 0.0 : sampleCoverage == 1.0;
+    float2 fastHistory = hasCurrent ? float2(luminance, 1.0) : 0.0;
+    float4 guide0 = _Guide0.Load(int3(pixel, 0));
+    float4 guide1 = _Guide1.Load(int3(pixel, 0));
+    float4 guide2 = _Guide2.Load(int3(pixel, 0));
+    float2 historyUv = GetHistoryUv(GetCurrentUv(id.xy), guide1.xy);
+    if (_HasValidHistory != 0 && !IsSkyGuide(guide0) && IsUvInsideHistory(historyUv))
+    {
+        float2 previousTexel = historyUv * float2(_Width, _Height) - 0.5;
+        int2 previousBase = int2(floor(previousTexel));
+        float2 f = frac(previousTexel);
+        float2 previousHistory = 0.0;
+        float totalWeight = 0.0;
+
+        [unroll]
+        for (int tapY = 0; tapY <= 1; tapY++)
+        {
+            [unroll]
+            for (int tapX = 0; tapX <= 1; tapX++)
+            {
+                int2 tap = clamp(previousBase + int2(tapX, tapY), 0, int2(_Width - 1, _Height - 1));
+                float relativeDepthDelta, normalAgreement;
+                if (!ValidateSurfaceHistory(guide0, guide1, guide2,
+                    _PrevGuide0.Load(int3(tap, 0)), _PrevGuide1.Load(int3(tap, 0)), _PrevGuide2.Load(int3(tap, 0)),
+                    relativeDepthDelta, normalAgreement))
+                    continue;
+
+                float w = (tapX == 0 ? 1.0 - f.x : f.x) * (tapY == 0 ? 1.0 - f.y : f.y);
+                float2 previousTap = _PrevSurfaceFastHistory.Load(int3(tap, 0));
+                if (previousTap.y <= 0.0)
+                    continue;
+                previousHistory += w * previousTap;
+                totalWeight += w;
+            }
+        }
+
+        if (totalWeight > 1e-4)
+        {
+            previousHistory /= totalWeight;
+            if (hasCurrent)
+            {
+                float coverage = saturate(totalWeight);
+                float historySamples = previousHistory.y * sqrt(coverage);
+                float currentWeight = shaded ? 1.0 : 1.0 - coverage;
+                if (shaded)
+                    historySamples = min(historySamples, (float)(_SurfaceFastHistoryLength - 1));
+
+                float totalSamples = historySamples + currentWeight;
+                float age = shaded ? totalSamples : previousHistory.y;
+                fastHistory = float2(lerp(previousHistory.x, luminance, currentWeight / totalSamples), age);
+            }
+            else
+            {
+                fastHistory = previousHistory;
+            }
+        }
+    }
+    _SurfaceFastHistory[pixel] = fastHistory;
+}
+
+#elif defined(LUCENT_ACCUMULATE_SURFACE)
+
+Texture2D<float2> _SurfaceFastHistory;
+
+float SurfaceFastHistoryScale(int2 pixel, float4 guide0, float4 guide1, float4 guide2, float historyLuma)
+{
+    float2 center = _SurfaceFastHistory.Load(int3(pixel, 0));
+    float sampleCoverage = _FrameShadowSum.Load(int3(pixel, 0)).a;
+    bool hasCenterObservation = center.y > 0.0 &&
+        (sampleCoverage == 1.0 || (sampleCoverage == 0.0 && CheckerboardShadePixel(uint2(pixel))));
+    if (hasCenterObservation && historyLuma <= center.x)
+        return 1.0;
+
+    float sum = 0.0;
+    float sumSquared = 0.0;
+    float count = 0.0;
+    for (int y = -2; y <= 2; y++)
+    {
+        for (int x = -2; x <= 2; x++)
+        {
+            int2 samplePixel = pixel + int2(x, y);
+            if (any(samplePixel < 0) || any(samplePixel >= int2(_Width, _Height)))
+                continue;
+            float4 sampleGuide0 = _Guide0.Load(int3(samplePixel, 0));
+            float4 sampleGuide1 = _Guide1.Load(int3(samplePixel, 0));
+            float4 sampleGuide2 = _Guide2.Load(int3(samplePixel, 0));
+            if (ComputeSurfaceSpatialBootstrapGuideWeight(guide0, guide1, guide2, sampleGuide0, sampleGuide1, sampleGuide2) <= 0.0)
+                continue;
+
+            float2 history = _SurfaceFastHistory.Load(int3(samplePixel, 0));
+            if (history.y <= 0.0)
+                continue;
+
+            float sampleLuma = history.x;
+            sum += sampleLuma;
+            sumSquared += sampleLuma * sampleLuma;
+            count += 1.0;
+        }
+    }
+
+    if (count < 2.0)
+        return 1.0;
+
+    float mean = sum / count;
+    float deviation = sqrt(max(sumSquared / count - mean * mean, 0.0));
+    float upper = mean + 2.0 * deviation;
+    if (hasCenterObservation)
+        upper = max(upper, center.x);
+    return min(upper / max(historyLuma, SIGNAL_STATISTICS_EPSILON), 1.0);
+}
+
+#endif
 
 bool ResolveSignalHistory(
     uint guideKind,
@@ -921,11 +1057,12 @@ bool ResolveSignalHistory(
     float4 historySignal;
     float4 historyMoments;
     float prevHitMaskForHistoryPixel;
+    float surfaceOwnerCoverage;
 
     if (!BilinearReprojectHistory(
         guideKind, signalKind, historyUv,
         currentGuide0, currentGuide1, currentGuide2,
-        historySignal, historyMoments, prevHitMaskForHistoryPixel,
+        historySignal, historyMoments, prevHitMaskForHistoryPixel, surfaceOwnerCoverage,
         relativeDepthDelta, normalAgreement, bestHistoryPixel))
     {
         return false;
@@ -945,30 +1082,50 @@ bool ResolveSignalHistory(
 
     if (signalKind == PATH_SIGNAL_SURFACE)
     {
-        float hitMaskDelta = abs(currentHitMask - prevHitMaskForHistoryPixel);
-        float hitMaskPenalty = 1.0f - hitMaskDelta;
-        hitMaskPenalty = pow(hitMaskPenalty, 2.0f);
-        historyConfidence *= hitMaskPenalty;
+        float coverageStatus = _FrameShadowSum.Load(int3(pixel, 0)).a;
+        if (coverageStatus == 1.0 || (foldCurrentSample && coverageStatus == 0.0))
+        {
+            float hitMaskDelta = abs(currentHitMask - prevHitMaskForHistoryPixel);
+            float hitMaskPenalty = 1.0 - hitMaskDelta;
+            historyConfidence *= hitMaskPenalty * hitMaskPenalty;
+        }
 
         float invSpp = rcp(max((float)_SamplesPerPixel, 1.0));
         int shadowRadius = _ShadowAntiLagRadius;
         float surfaceShadowSum = 0.0;
         float prevSurfaceShadowSum = 0.0;
+        float shadowWeight = 0.0;
+        int2 size = int2(_Width, _Height);
         for (int sy = -shadowRadius; sy <= shadowRadius; ++sy)
         {
             for (int sx = -shadowRadius; sx <= shadowRadius; ++sx)
             {
                 int2 neighborOffset = int2(sx, sy);
-                surfaceShadowSum += saturate(_FrameShadowSum.Load(int3(int2(pixel) + neighborOffset, 0)).r * invSpp);
-                prevSurfaceShadowSum += _PrevShadowHitMask.Load(int3(bestHistoryPixel + neighborOffset, 0));
+                int2 currentNeighbor = int2(pixel) + neighborOffset;
+                int2 previousNeighbor = bestHistoryPixel + neighborOffset;
+                if (any(currentNeighbor < 0) || any(currentNeighbor >= size) ||
+                    any(previousNeighbor < 0) || any(previousNeighbor >= size))
+                    continue;
+
+                float4 shadow = _FrameShadowSum.Load(int3(currentNeighbor, 0));
+                if (shadow.a != 0.0 || !CheckerboardShadePixel(uint2(currentNeighbor)))
+                    continue;
+
+                if (_Guide1.Load(int3(currentNeighbor, 0)).z != currentGuide1.z ||
+                    _PrevGuide1.Load(int3(previousNeighbor, 0)).z != currentGuide1.z)
+                    continue;
+
+                surfaceShadowSum += saturate(shadow.r * invSpp);
+                prevSurfaceShadowSum += _PrevShadowHitMask.Load(int3(previousNeighbor, 0));
+                shadowWeight += 1.0;
             }
         }
-        float shadowSampleCount = (float)((2 * shadowRadius + 1) * (2 * shadowRadius + 1));
-        float currentShadowFraction = surfaceShadowSum / max(shadowSampleCount, 1.0);
-        float prevAccumShadow = prevSurfaceShadowSum / max(shadowSampleCount, 1.0);
-        float shadowDelta = abs(currentShadowFraction - prevAccumShadow);
-        float shadowGate = saturate(prevHistoryLength * _ShadowAntiLagWarmup);
-        historyConfidence *= lerp(1.0, pow(saturate(1.0 - shadowDelta), _ShadowAntiLagSensitivity), shadowGate);
+        if (shadowWeight > 0.0)
+        {
+            float shadowChangeExcess = ComputeSampledShadowChangeExcess(surfaceShadowSum, prevSurfaceShadowSum, shadowWeight);
+            float shadowGate = saturate(prevHistoryLength * _ShadowAntiLagWarmup);
+            historyConfidence *= lerp(1.0, pow(1.0 - shadowChangeExcess, _ShadowAntiLagSensitivity), shadowGate);
+        }
     }
     else if (signalKind == PATH_SIGNAL_REFLECTION)
     {
@@ -1025,18 +1182,40 @@ bool ResolveSignalHistory(
         }
     }
 
+#if defined(LUCENT_ACCUMULATE_SURFACE)
+    if (_SurfaceFastHistoryLength > 0 && signalKind == PATH_SIGNAL_SURFACE && !skyHistory && motionPixels > 0.5)
+    {
+        float scale = SurfaceFastHistoryScale(int2(pixel), currentGuide0, currentGuide1, currentGuide2, ComputeLuminance(historySignal.rgb));
+        historySignal.rgb *= scale;
+        historyMoments.xy *= float2(scale, scale * scale);
+    }
+#endif
+
     previousSignal = historySignal;
     previousMoments = historyMoments;
 
+    float currentWeight = foldCurrentSample ? 1.0 : 0.0;
+    if (signalKind == PATH_SIGNAL_SURFACE && (foldCurrentSample || _FrameShadowSum.Load(int3(pixel, 0)).a > 0.0))
+    {
+        // Footprint quality shortens the effective history instead of injecting
+        // an uncovered color fraction from a single noisy observation.
+        float coverage = saturate(surfaceOwnerCoverage);
+        historyConfidence *= sqrt(coverage);
+        if (!foldCurrentSample)
+            currentWeight = 1.0 - coverage;
+    }
+
     effectivePrevHistoryLength = prevHistoryLength * historyConfidence;
-    historyAlpha = foldCurrentSample ? rcp(effectivePrevHistoryLength + 1.0) : 0.0;
+    float totalSamples = effectivePrevHistoryLength + currentWeight;
+    historyAlpha = currentWeight > 0.0 ? currentWeight / totalSamples : 0.0;
+    // A reconstructed checkerboard observation does not add to the age.
+    float historyLength = foldCurrentSample ? min(totalSamples, (float)_MaxHistoryLength) : prevHistoryLength;
 
     accumulatedSignal = lerp(previousSignal, currentSignal, historyAlpha);
 
     float currentLuminance = ComputeLuminance(currentSignal.rgb);
     float moment1 = lerp(historyMoments.x, currentLuminance, historyAlpha);
     float moment2 = lerp(historyMoments.y, currentLuminance * currentLuminance, historyAlpha);
-    float historyLength = foldCurrentSample ? min(effectivePrevHistoryLength + 1.0, (float)_MaxHistoryLength) : prevHistoryLength;
     float variance = max(moment2 - moment1 * moment1, 0.0);
     signalMoments = float4(moment1, moment2, historyLength, variance);
 
@@ -1199,12 +1378,14 @@ void AccumulateFrameBody(uint3 id)
         accumulatedHitMask = lerp(prevAccumulatedHitMask, currentHitMask, surfaceHistoryAlpha);
     }
 
-    float currentShadowFractionFrame = saturate(_FrameShadowSum.Load(int3(pixel, 0)).r * invSampleCount);
+    float4 currentShadow = _FrameShadowSum.Load(int3(pixel, 0));
+    float currentShadowFractionFrame = saturate(currentShadow.r * invSampleCount);
     float accumulatedShadowMask = currentShadowFractionFrame;
     if (surfaceHistoryAccepted)
     {
         float prevAccumShadowMask = _PrevShadowHitMask.Load(int3(surfacePrevPixel, 0));
-        float shadowAccumAlpha = foldCurrentSample ? max(rcp(max((float)_MaxHistoryLength, 1.0)), 0.1) : 0.0;
+        float shadowAccumAlpha = foldCurrentSample && currentShadow.a == 0.0
+            ? max(rcp(max((float)_MaxHistoryLength, 1.0)), 0.1) : 0.0;
         accumulatedShadowMask = lerp(prevAccumShadowMask, currentShadowFractionFrame, shadowAccumAlpha);
     }
 #if defined(LUCENT_ACCUMULATE_SURFACE)
@@ -1225,6 +1406,7 @@ void AccumulateFrameBody(uint3 id)
 
     int surfaceBootstrapRadius = ComputeYoungHistoryRadius(clamp(_SpatialBootstrapRadius, 0, 3), surfaceYoungHistoryBoost);
     float surfaceSpatialBlend = 0.0;
+    bool surfaceBootstrapQueued = false;
 
     if (_UseSecondaryCompaction == 0)
     {
@@ -1342,14 +1524,18 @@ void AccumulateFrameBody(uint3 id)
         {
             _BootstrapActiveIndices[bootstrapSlot] = pixel.y * (uint)_Width + pixel.x;
         }
+        surfaceBootstrapQueued = surfaceBootstrapMiss;
 #endif
 
-        PreserveRepairUncertainty(
-            surfaceMoments,
-            ComputeLuminance(accumulatedSurface.rgb),
-            0.0,
-            surfaceMoments.w,
-            ComputeRecoveryBoost(surfaceMoments.z, 0.0, surfaceHistoryConfidence));
+        if (!surfaceBootstrapQueued)
+        {
+            PreserveRepairUncertainty(
+                surfaceMoments,
+                ComputeLuminance(accumulatedSurface.rgb),
+                0.0,
+                surfaceMoments.w,
+                ComputeRecoveryBoost(surfaceMoments.z, 0.0, surfaceHistoryConfidence));
+        }
     }
 
     StoreSignalMoments(PATH_SIGNAL_SURFACE, pixel, surfaceMoments);
@@ -1367,8 +1553,16 @@ void AccumulateFrameBody(uint3 id)
 #endif
 #if defined(LUCENT_ACCUMULATE_SURFACE)
     _SurfaceSignal[pixel] = accumulatedSurface;
-    _SurfaceYoungHistorySignal[pixel] = BuildYoungHistoryAtrousSignal(surfaceMoments.z, surfaceSpatialBlend, surfaceHistoryConfidence, surfaceMoments.w);
-    StoreCompositeMoments(pixel, accumulatedSurface, surfaceMoments);
+    if (surfaceBootstrapQueued)
+    {
+        // The compacted pass finishes these pixels before the denoiser reads this texture.
+        _SurfaceYoungHistorySignal[pixel] = float4(0.0, 0.0, surfaceHistoryConfidence, 0.0);
+    }
+    else
+    {
+        _SurfaceYoungHistorySignal[pixel] = BuildYoungHistoryAtrousSignal(surfaceMoments.z, surfaceSpatialBlend, surfaceHistoryConfidence, surfaceMoments.w);
+        StoreCompositeMoments(pixel, accumulatedSurface, surfaceMoments);
+    }
 #endif
 }
 
@@ -1696,14 +1890,13 @@ void CSReflectionPrePass(uint3 id : SV_DispatchThreadID)
 #endif
 
 #if defined(LUCENT_ACCUMULATE_SPECULAR)
-[numthreads(LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE, 1, 1)]
+[numthreads(64, 1, 1)]
 void CSAccumulateSecondary(uint3 id : SV_DispatchThreadID)
 {
-    uint index = id.x + id.y * (_SecondaryDispatchInfo[0] * LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE);
-    if (index >= _SecondaryDispatchInfo[3])
+    if (id.x >= _SecondaryActiveCount[3])
         return;
 
-    uint pixelIndex = _ActiveSecondaryIndices[index];
+    uint pixelIndex = _ActiveSecondaryIndices[id.x];
     uint2 pixel = uint2(pixelIndex % (uint)_Width, pixelIndex / (uint)_Width);
     AccumulateSecondaryCompacted(pixel);
 }
@@ -1722,31 +1915,9 @@ void BootstrapSurfaceCompacted(uint2 pixel)
     float4 currentGuide1 = _Guide1.Load(int3(pixel, 0));
     float4 currentGuide2 = _Guide2.Load(int3(pixel, 0));
 
-    float4 accumulatedSurface = currentSurface;
-    float4 previousSurface = currentSurface;
-    float4 surfaceMoments = BuildInitialMoments(currentSurface);
-    float surfaceHistoryConfidence = 0.0;
-    float surfaceEffectivePrevHistoryLength = 0.0;
-    float surfaceHistoryAlpha = 1.0;
-    int2 surfacePrevPixel = pixelInt;
-
-    bool surfaceHistoryAccepted = ResolveSignalHistory(
-        SIGNAL_GUIDE_SURFACE,
-        PATH_SIGNAL_SURFACE,
-        pixel,
-        currentGuide0,
-        currentGuide1,
-        currentGuide2,
-        currentSurface,
-        accumulatedSurface,
-        previousSurface,
-        surfaceMoments,
-        surfaceMoments,
-        surfaceHistoryConfidence,
-        surfaceEffectivePrevHistoryLength,
-        surfaceHistoryAlpha,
-        surfacePrevPixel,
-        true);
+    float4 accumulatedSurface = _SurfaceSignal[pixel];
+    float4 surfaceMoments = _SurfaceMoments[pixel];
+    float surfaceHistoryConfidence = _SurfaceYoungHistorySignal[pixel].z;
 
     float surfaceYoungHistoryBoost = 0.0;
     int surfaceVarianceRadius = 0;
@@ -1787,7 +1958,7 @@ void BootstrapSurfaceCompacted(uint2 pixel)
     float surfaceSpatialVariance = spatialNeighborhood.surfaceBootstrap.variance;
     float4 spatialSurface = spatialNeighborhood.surfaceBootstrap.signal;
 
-    float temporalMissAmount = surfaceHistoryAccepted ? saturate(1.0 - surfaceHistoryConfidence) : 1.0;
+    float temporalMissAmount = saturate(1.0 - surfaceHistoryConfidence);
     float surfaceBootstrapBlend = lerp(saturate(_HistoryMissSpatialBlend), saturate(_YoungHistoryBlend), surfaceYoungHistoryBoost);
     float surfaceSpatialBlend = surfaceBootstrapBlend * temporalMissAmount * surfaceSpatialBlendScale;
     if (surfaceSpatialBlend > 0.0)
@@ -1820,17 +1991,8 @@ void BootstrapSurfaceCompacted(uint2 pixel)
             ComputeRecoveryBoost(surfaceMoments.z, 0.0, surfaceHistoryConfidence));
     }
 
-    float currentShadowFractionFrame = saturate(_FrameShadowSum.Load(int3(pixel, 0)).r * invSampleCount);
-    float accumulatedShadowMask = currentShadowFractionFrame;
-    if (surfaceHistoryAccepted)
-    {
-        float prevAccumShadowMask = _PrevShadowHitMask.Load(int3(surfacePrevPixel, 0));
-        float shadowAccumAlpha = max(rcp(max((float)_MaxHistoryLength, 1.0)), 0.1);
-        accumulatedShadowMask = lerp(prevAccumShadowMask, currentShadowFractionFrame, shadowAccumAlpha);
-    }
     if (surfaceSpatialBlend > 0.0)
-        accumulatedShadowMask = lerp(accumulatedShadowMask, spatialNeighborhood.surfaceBootstrap.shadowSignal, surfaceSpatialBlend);
-    _ShadowHitMask[pixel] = accumulatedShadowMask;
+        _ShadowHitMask[pixel] = lerp(_ShadowHitMask[pixel], spatialNeighborhood.surfaceBootstrap.shadowSignal, surfaceSpatialBlend);
 
     StoreSignalMoments(PATH_SIGNAL_SURFACE, pixel, surfaceMoments);
     _SurfaceSignal[pixel] = accumulatedSurface;
@@ -1842,20 +2004,26 @@ void BootstrapSurfaceCompacted(uint2 pixel)
 [numthreads(1, 1, 1)]
 void CSClearBootstrapArgs(uint3 id : SV_DispatchThreadID)
 {
+    _BootstrapDispatchArgs[4] = 0u;
+    _BootstrapDispatchArgs[5] = 1u;
+    _BootstrapDispatchArgs[6] = 1u;
     _BootstrapDispatchArgs[7] = 0u;
 }
 
 [numthreads(1, 1, 1)]
 void CSFinalizeBootstrapArgs(uint3 id : SV_DispatchThreadID)
 {
-    WriteTemporalDispatchArgs(_BootstrapDispatchArgs, 4u, _BootstrapDispatchArgs[7]);
+    uint groupCount = (_BootstrapDispatchArgs[7] + 63u) / 64u;
+    uint groupsY = max((groupCount + 65534u) / 65535u, 1u);
+    _BootstrapDispatchArgs[4] = (groupCount + groupsY - 1u) / groupsY;
+    _BootstrapDispatchArgs[5] = groupsY;
 }
 
 #if defined(LUCENT_ACCUMULATE_SURFACE)
-[numthreads(LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE, 1, 1)]
+[numthreads(64, 1, 1)]
 void CSBootstrapSurface(uint3 id : SV_DispatchThreadID)
 {
-    uint index = id.x + id.y * (_BootstrapDispatchInfo[4] * LUCENT_TEMPORAL_COMPACTED_GROUP_SIZE);
+    uint index = id.x + id.y * (_BootstrapDispatchInfo[4] * 64u);
     if (index >= _BootstrapDispatchInfo[7])
         return;
 

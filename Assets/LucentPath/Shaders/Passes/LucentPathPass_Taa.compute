@@ -5,13 +5,15 @@
 Texture2D<float4> _TaaCurrentColor;
 Texture2D<float4> _TaaPrevColor;
 Texture2D<float4> _TaaMotionGuide;
+Texture2D<float4> _TaaPrevSurfaceGuide;
 RWTexture2D<float4> _TaaOutput;
-SamplerState sampler_TaaPrevColor;
 
 int _Width;
 int _Height;
 int _HasValidHistory;
 float _TaaFeedback;
+float2 _CameraJitterUv;
+float2 _PrevCameraJitterUv;
 
 #define ANTI_FIREFLY_RADIUS 4
 #define ANTI_FIREFLY_SIGMA_SCALE 2.0
@@ -56,6 +58,40 @@ float3 ClipToAabb(float3 prev, float3 center, float3 extent)
     return center + d / maxUnit;
 }
 
+bool TryLoadTaaHistory(float2 prevUv, float surfaceOwner, int2 size, out float3 historyColor, out float coverage)
+{
+    float2 prevPixel = prevUv * float2(size) - 0.5;
+    int2 basePixel = int2(floor(prevPixel));
+    float2 fraction = frac(prevPixel);
+    coverage = 0.0;
+    historyColor = 0.0;
+    [unroll]
+    for (int y = 0; y < 2; y++)
+    {
+        [unroll]
+        for (int x = 0; x < 2; x++)
+        {
+            float2 axisWeight = lerp(1.0 - fraction, fraction, float2(x, y));
+            float weight = axisWeight.x * axisWeight.y;
+            if (weight == 0.0)
+                continue;
+
+            int2 tap = clamp(basePixel + int2(x, y), int2(0, 0), size - 1);
+            float4 guide = _TaaPrevSurfaceGuide.Load(int3(tap, 0));
+            if (guide.z == surfaceOwner)
+            {
+                historyColor += weight * _TaaPrevColor.Load(int3(tap, 0)).rgb;
+                coverage += weight;
+            }
+        }
+    }
+    if (coverage <= 0.0)
+        return false;
+
+    historyColor /= coverage;
+    return true;
+}
+
 [numthreads(8, 8, 1)]
 void CSTaaResolve(uint3 id : SV_DispatchThreadID)
 {
@@ -64,8 +100,22 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
 
     int2 pixel = int2(id.xy);
     float4 current = _TaaCurrentColor.Load(int3(pixel, 0));
+    float4 currentGuide = _TaaMotionGuide.Load(int3(pixel, 0));
 
     if (_HasValidHistory == 0)
+    {
+        _TaaOutput[pixel] = current;
+        return;
+    }
+
+    int2 size = int2(_Width, _Height);
+    float2 currentUv = (float2(pixel) + 0.5) / float2(size);
+    // Same unjittered motion convention as Surface reprojection.
+    float2 prevUv = currentUv + _CameraJitterUv - currentGuide.xy - _PrevCameraJitterUv;
+    float3 previousColor;
+    float coverage;
+    if (any(prevUv < 0.0) || any(prevUv > 1.0) ||
+        !TryLoadTaaHistory(prevUv, currentGuide.z, size, previousColor, coverage))
     {
         _TaaOutput[pixel] = current;
         return;
@@ -88,7 +138,12 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
                 continue;
 
             int2 samplePixel = pixel + int2(x, y);
-            samplePixel = clamp(samplePixel, int2(0, 0), int2(_Width - 1, _Height - 1));
+            if (any(samplePixel < 0) || any(samplePixel >= size))
+                continue;
+
+            float4 sampleGuide = _TaaMotionGuide.Load(int3(samplePixel, 0));
+            if (sampleGuide.z != currentGuide.z)
+                continue;
 
             float3 neighbor = RgbToYCoCg(max(_TaaCurrentColor.Load(int3(samplePixel, 0)).rgb, 0.0));
             minColor = min(minColor, neighbor);
@@ -99,37 +154,27 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    float invCount = rcp(count);
-    float3 meanColor = sumColor * invCount;
-    float3 sigma = sqrt(max(sumColorSq * invCount - meanColor * meanColor, 0.0));
-    float3 sigmaMin = meanColor - sigma * 1.25;
-    float3 sigmaMax = meanColor + sigma * 1.25;
-    minColor = max(minColor, sigmaMin);
-    maxColor = min(maxColor, sigmaMax);
-
-    float2 motion = _TaaMotionGuide.Load(int3(pixel, 0)).xy;
-    float2 currentUv = (float2(pixel) + 0.5) / float2(_Width, _Height);
-    float2 prevUv = currentUv - motion;
-
-    if (any(prevUv < 0.0) || any(prevUv > 1.0))
+    float3 historyColor = max(previousColor, 0.0);
+    // A single current sample does not define variance or a reliable clipping box.
+    if (count > 1.0)
     {
-        _TaaOutput[pixel] = current;
-        return;
+        float invCount = rcp(count);
+        float3 meanColor = sumColor * invCount;
+        float3 sigma = sqrt(max(sumColorSq * invCount - meanColor * meanColor, 0.0));
+        minColor = max(minColor, meanColor - sigma * 1.25);
+        maxColor = min(maxColor, meanColor + sigma * 1.25);
+
+        float3 aabbCenter = (minColor + maxColor) * 0.5;
+        float3 aabbExtent = max(maxColor - minColor, 1e-5) * 0.5;
+        float3 clampedYCoCg = ClipToAabb(RgbToYCoCg(historyColor), aabbCenter, aabbExtent);
+        historyColor = max(YCoCgToRgb(clampedYCoCg), 0.0);
     }
 
-    float4 prev = _TaaPrevColor.SampleLevel(sampler_TaaPrevColor, prevUv, 0);
-    float3 prevYCoCg = RgbToYCoCg(max(prev.rgb, 0.0));
-    float3 centerYCoCg = RgbToYCoCg(max(current.rgb, 0.0));
-    float3 aabbCenter = (minColor + maxColor) * 0.5;
-    float3 aabbExtent = max(maxColor - minColor, 1e-5) * 0.5;
-    float3 clampedYCoCg = ClipToAabb(prevYCoCg, aabbCenter, aabbExtent);
-    float3 clampedRgb = max(YCoCgToRgb(clampedYCoCg), 0.0);
-
-    float motionPixels = length(motion * float2(_Width, _Height));
+    float motionPixels = length(currentGuide.xy * float2(size));
     float baseFeedback = saturate(_TaaFeedback);
     float staticFeedback = max(baseFeedback, 0.985);
-    float feedback = lerp(staticFeedback, baseFeedback, saturate(motionPixels));
-    float3 blended = lerp(current.rgb, clampedRgb, feedback);
+    float feedback = lerp(staticFeedback, baseFeedback, saturate(motionPixels)) * saturate(coverage);
+    float3 blended = lerp(current.rgb, historyColor, feedback);
 
     _TaaOutput[pixel] = float4(blended, current.a);
 }

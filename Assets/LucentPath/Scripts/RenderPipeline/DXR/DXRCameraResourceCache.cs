@@ -178,6 +178,10 @@ namespace LucentPath.Rendering
             state.PrevResult = CreateCameraTexture(lightingDesc, $"DXR_ResultPrev_{width}x{height}", FilterMode.Bilinear);
             state.Moments = CreateCameraTexture(momentsDesc, $"DXR_Moments_{width}x{height}", FilterMode.Point);
             state.PrevMoments = CreateCameraTexture(momentsDesc, $"DXR_MomentsPrev_{width}x{height}", FilterMode.Point);
+            var fastHistoryDesc = momentsDesc;
+            fastHistoryDesc.graphicsFormat = GraphicsFormat.R16G16_SFloat;
+            state.SurfaceFastHistory = CreateCameraTexture(fastHistoryDesc, $"DXR_SurfaceFastHistory_{width}x{height}", FilterMode.Point);
+            state.PrevSurfaceFastHistory = CreateCameraTexture(fastHistoryDesc, $"DXR_SurfaceFastHistoryPrev_{width}x{height}", FilterMode.Point);
             state.SurfaceSignal.Moments = CreateCameraTexture(momentsDesc, $"DXR_SurfaceMoments_{width}x{height}", FilterMode.Point);
             state.SurfaceSignal.PrevMoments = CreateCameraTexture(momentsDesc, $"DXR_SurfaceMomentsPrev_{width}x{height}", FilterMode.Point);
             state.ReflectionSignal.Moments = CreateCameraTexture(momentsDesc, $"DXR_ReflectionMoments_{width}x{height}", FilterMode.Point);
@@ -420,6 +424,7 @@ namespace LucentPath.Rendering
         public void SwapHistoryBuffers(CameraState state)
         {
             Swap(ref state.Moments, ref state.PrevMoments);
+            Swap(ref state.SurfaceFastHistory, ref state.PrevSurfaceFastHistory);
             Swap(ref state.SurfaceSignal.Moments, ref state.SurfaceSignal.PrevMoments);
             Swap(ref state.ReflectionSignal.Moments, ref state.ReflectionSignal.PrevMoments);
             Swap(ref state.TransmissionSignal.Moments, ref state.TransmissionSignal.PrevMoments);
@@ -656,6 +661,8 @@ namespace LucentPath.Rendering
                    IsRtHandleValid(state.PrevResult, width, height) &&
                    IsRtHandleValid(state.Moments, width, height) &&
                    IsRtHandleValid(state.PrevMoments, width, height) &&
+                   IsRtHandleValid(state.SurfaceFastHistory, width, height, GraphicsFormat.R16G16_SFloat) &&
+                   IsRtHandleValid(state.PrevSurfaceFastHistory, width, height, GraphicsFormat.R16G16_SFloat) &&
                    IsRtHandleValid(state.SurfaceSignal.Moments, width, height) &&
                    IsRtHandleValid(state.SurfaceSignal.PrevMoments, width, height) &&
                    IsRtHandleValid(state.ReflectionSignal.Moments, width, height) &&
@@ -773,6 +780,8 @@ namespace LucentPath.Rendering
             ReleaseRtHandle(ref state.PrevResult);
             ReleaseRtHandle(ref state.Moments);
             ReleaseRtHandle(ref state.PrevMoments);
+            ReleaseRtHandle(ref state.PrevSurfaceFastHistory);
+            ReleaseRtHandle(ref state.SurfaceFastHistory);
             ReleaseRtHandle(ref state.SurfaceSignal.Moments);
             ReleaseRtHandle(ref state.SurfaceSignal.PrevMoments);
             ReleaseRtHandle(ref state.ReflectionSignal.Moments);

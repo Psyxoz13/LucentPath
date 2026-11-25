@@ -230,6 +230,14 @@ namespace LucentPath.Rendering
                 PipelineShaderProperties.CheckerboardFullRateHistoryFramesProperty,
                 state.IsValid ? Mathf.Clamp(_resources.Asset.CheckerboardSettings.FullRateHistoryFrames, 0, 64) : 0);
 
+            Vector3 cameraDisplacement = camera.transform.position - state.LastCameraWorldPos;
+            float depthDisplacement = Vector3.Dot(cameraDisplacement, camera.transform.forward);
+            bool hasDominantAxialMotion = depthDisplacement * depthDisplacement > 0.5f * cameraDisplacement.sqrMagnitude;
+            bool limitCheckerboardPromotion = state.IsValid &&
+                !hasDominantAxialMotion && !state.LastViewProj.Equals(nonJitteredViewProj);
+            int promotionPhase = limitCheckerboardPromotion ? 1 + ((_resources.FrameIndex >> 1) & 3) : 0;
+            cmd.SetGlobalInt(PipelineShaderProperties.CheckerboardPromotionPhaseProperty, promotionPhase);
+
             EnsureEmissiveSurfels();
             BindBlueNoiseGlobals(cmd);
             BindEnvironmentGlobals(cmd, camera);

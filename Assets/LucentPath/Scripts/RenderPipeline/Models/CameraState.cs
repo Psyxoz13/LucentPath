@@ -36,6 +36,8 @@ namespace LucentPath.Rendering
         public RTHandle TransmissionShadowHitMask;
         public RTHandle PrevTransmissionShadowHitMask;
         public RTHandle FrameSurfaceSignalSum;
+        public RTHandle SurfaceFastHistory;
+        public RTHandle PrevSurfaceFastHistory;
         public RTHandle FrameReflectionSignalSum;
         public RTHandle ReflectionPrePassSignal;
         public RTHandle FrameTransmissionSignalSum;

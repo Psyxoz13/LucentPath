@@ -12,6 +12,7 @@ namespace LucentPath.Rendering
         public ComputeKernel ResolveSecondaryGuides;
         public ComputeKernel AccumulateFrame;
         public ComputeKernel AccumulateFrameSpecular;
+        public ComputeKernel BuildSurfaceFastHistory;
         public ComputeKernel CheckerboardResolve;
         public ComputeKernel PrepareBuffers;
         public ComputeKernel DecayGuidingField;

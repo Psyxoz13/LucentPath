@@ -193,6 +193,7 @@ namespace LucentPath.Rendering
 
             cmd.SetComputeFloatParam(compute, AtrousDepthPhiProperty, Mathf.Max(.1f, asset.ATrousSettings.AtrousDepthPhi));
             cmd.SetComputeFloatParam(compute, AtrousNormalPhiProperty, Mathf.Max(1f, asset.ATrousSettings.AtrousNormalPhi));
+            cmd.SetComputeIntParam(compute, YoungHistoryFramesProperty, Mathf.Clamp(asset.DisocclusionRecoverySettings.YoungHistoryFrames, 0, 16));
             cmd.SetComputeTextureParam(compute, kernel, PrimaryRoughnessProperty, state.PrimaryRoughness.nameID);
 
             for (var i = 0; i < iterations; i++)
