@@ -10,6 +10,8 @@
 #define PATH_FLAG_ENV_NEE_PREV_VERTEX 256u
 #define PATH_FLAG_SURFEL_NEE_PREV_VERTEX 512u
 #define PATH_FLAG_DELTA_TRANSMISSION_CHAIN 1024u
+#define PATH_FLAG_STOCHASTIC_SCATTER 2048u
+#define PATH_FLAG_SKY_TRANSMISSION_RESOLVED 4096u
 #define PATH_SIGNAL_KIND_SHIFT 3u
 #define PATH_SIGNAL_KIND_MASK (3u << PATH_SIGNAL_KIND_SHIFT)
 
@@ -464,6 +466,22 @@ void AccumulateFrameSurfaceSignal(uint2 pixel, float3 value, uint depth)
 }
 
 void AccumulateFrameEmission(uint2 pixel, PathState state, float3 value);
+
+#if defined(LUCENT_PATH_DXR_MERGED)
+void AccumulateFrameStableReflection(uint2 pixel, float3 value)
+{
+    float4 stableLighting = _FrameEmissionSum[pixel];
+    stableLighting.rgb += ApplySpecularDemodulation(pixel, value) * _PrimarySpecularF0[pixel].rgb;
+    _FrameEmissionSum[pixel] = stableLighting;
+}
+
+void MarkFramePrimaryEmission(uint2 pixel)
+{
+    float4 stableLighting = _FrameEmissionSum[pixel];
+    stableLighting.a = 1.0;
+    _FrameEmissionSum[pixel] = stableLighting;
+}
+#endif
 
 void AccumulateFrameReflectionSignal(uint2 pixel, PathState state, float3 value)
 {

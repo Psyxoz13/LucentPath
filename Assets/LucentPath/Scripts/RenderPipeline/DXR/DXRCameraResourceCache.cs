@@ -218,8 +218,8 @@ namespace LucentPath.Rendering
             state.ShadowSignal.Guide2 = CreateCameraTexture(guide2Desc, $"DXR_ShadowGuide2_{width}x{height}", FilterMode.Point);
             state.ShadowSignal.PrevGuide2 = CreateCameraTexture(guide2Desc, $"DXR_ShadowGuide2Prev_{width}x{height}", FilterMode.Point);
 
-            state.ReflectionGuideEvent.Allocate(secondaryGuideEventDesc, "DXR_ReflectionGuide", width, height);
-            state.TransmissionGuideEvent.Allocate(secondaryGuideEventDesc, "DXR_TransmissionGuide", width, height);
+            state.ReflectionGuideEvent.Allocate(secondaryGuideEventDesc, "DXR_ReflectionGuide", width, height, false);
+            state.TransmissionGuideEvent.Allocate(secondaryGuideEventDesc, "DXR_TransmissionGuide", width, height, true);
 
             state.FilterPing = CreateCameraTexture(lightingDesc, $"DXR_FilterPing_{width}x{height}", FilterMode.Bilinear);
             state.FilterPong = CreateCameraTexture(lightingDesc, $"DXR_FilterPong_{width}x{height}", FilterMode.Bilinear);
@@ -451,7 +451,6 @@ namespace LucentPath.Rendering
             Swap(ref state.ReflectionHitDistance, ref state.PrevReflectionHitDistance);
             Swap(ref state.TransmissionHitDistance, ref state.PrevTransmissionHitDistance);
             Swap(ref state.PrimaryRoughness, ref state.PrevPrimaryRoughness);
-            state.ReflectionGuideEvent.SwapHistory();
             state.TransmissionGuideEvent.SwapHistory();
         }
 

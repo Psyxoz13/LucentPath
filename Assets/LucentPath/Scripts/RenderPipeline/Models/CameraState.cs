@@ -122,28 +122,36 @@ namespace LucentPath.Rendering
             public RTHandle Event3;
             public RTHandle PrevEvent3;
 
-            public void Allocate(RenderTextureDescriptor desc, string namePrefix, int width, int height)
+            private bool _hasHistory;
+
+            public void Allocate(RenderTextureDescriptor desc, string namePrefix, int width, int height, bool hasHistory)
             {
                 Event0 = Create(desc, $"{namePrefix}Event0_{width}x{height}");
-                PrevEvent0 = Create(desc, $"{namePrefix}Event0Prev_{width}x{height}");
                 Event1 = Create(desc, $"{namePrefix}Event1_{width}x{height}");
-                PrevEvent1 = Create(desc, $"{namePrefix}Event1Prev_{width}x{height}");
                 Event2 = Create(desc, $"{namePrefix}Event2_{width}x{height}");
-                PrevEvent2 = Create(desc, $"{namePrefix}Event2Prev_{width}x{height}");
                 Event3 = Create(desc, $"{namePrefix}Event3_{width}x{height}");
-                PrevEvent3 = Create(desc, $"{namePrefix}Event3Prev_{width}x{height}");
+
+                _hasHistory = hasHistory;
+                if (_hasHistory)
+                {
+                    PrevEvent0 = Create(desc, $"{namePrefix}Event0Prev_{width}x{height}");
+                    PrevEvent1 = Create(desc, $"{namePrefix}Event1Prev_{width}x{height}");
+                    PrevEvent2 = Create(desc, $"{namePrefix}Event2Prev_{width}x{height}");
+                    PrevEvent3 = Create(desc, $"{namePrefix}Event3Prev_{width}x{height}");
+                }
             }
 
             public bool IsValid(int width, int height, GraphicsFormat format)
             {
                 return IsValid(Event0, width, height, format) &&
-                       IsValid(PrevEvent0, width, height, format) &&
                        IsValid(Event1, width, height, format) &&
-                       IsValid(PrevEvent1, width, height, format) &&
                        IsValid(Event2, width, height, format) &&
-                       IsValid(PrevEvent2, width, height, format) &&
                        IsValid(Event3, width, height, format) &&
-                       IsValid(PrevEvent3, width, height, format);
+                       (!_hasHistory ||
+                        IsValid(PrevEvent0, width, height, format) &&
+                        IsValid(PrevEvent1, width, height, format) &&
+                        IsValid(PrevEvent2, width, height, format) &&
+                        IsValid(PrevEvent3, width, height, format));
             }
 
             public void SwapHistory()

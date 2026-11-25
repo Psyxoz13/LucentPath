@@ -150,6 +150,7 @@ namespace LucentPath.Rendering
         public static readonly int TaaMotionGuideProperty = Shader.PropertyToID("_TaaMotionGuide");
         public static readonly int TaaPrevSurfaceGuideProperty = Shader.PropertyToID("_TaaPrevSurfaceGuide");
         public static readonly int TaaOutputProperty = Shader.PropertyToID("_TaaOutput");
+        public static readonly int TaaHistoryOutputProperty = Shader.PropertyToID("_TaaHistoryOutput");
         public static readonly int AntiFireflyInputProperty = Shader.PropertyToID("_AntiFireflyInput");
         public static readonly int AntiFireflyOutputProperty = Shader.PropertyToID("_AntiFireflyOutput");
         public static readonly int TaaFeedbackProperty = Shader.PropertyToID("_TaaFeedback");
@@ -195,10 +196,6 @@ namespace LucentPath.Rendering
         public static readonly int ReflectionGuideEvent1Property = Shader.PropertyToID("_ReflectionGuideEvent1");
         public static readonly int ReflectionGuideEvent2Property = Shader.PropertyToID("_ReflectionGuideEvent2");
         public static readonly int ReflectionGuideEvent3Property = Shader.PropertyToID("_ReflectionGuideEvent3");
-        public static readonly int PrevReflectionGuideEvent0Property = Shader.PropertyToID("_PrevReflectionGuideEvent0");
-        public static readonly int PrevReflectionGuideEvent1Property = Shader.PropertyToID("_PrevReflectionGuideEvent1");
-        public static readonly int PrevReflectionGuideEvent2Property = Shader.PropertyToID("_PrevReflectionGuideEvent2");
-        public static readonly int PrevReflectionGuideEvent3Property = Shader.PropertyToID("_PrevReflectionGuideEvent3");
         public static readonly int TransmissionGuideEvent0Property = Shader.PropertyToID("_TransmissionGuideEvent0");
         public static readonly int TransmissionGuideEvent1Property = Shader.PropertyToID("_TransmissionGuideEvent1");
         public static readonly int TransmissionGuideEvent2Property = Shader.PropertyToID("_TransmissionGuideEvent2");

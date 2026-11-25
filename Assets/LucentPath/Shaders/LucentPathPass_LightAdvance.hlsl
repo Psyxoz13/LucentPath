@@ -205,6 +205,7 @@ void LightAdvanceBody(uint2 pixel, inout PathState state, Hit hit, GpuSurfaceHit
 
     if (_SubsurfaceEnabled != 0 && IsSubsurfaceSurface(surface) && IsThinWalledTranslucentSurface(surface) == false)
     {
+        state.flags |= PATH_FLAG_STOCHASTIC_SCATTER;
         float subsurfaceProbability = OpenPbrSubsurfaceMixWeight(surface);
         float uSubsurfacePick = GetBounceSssLobeSelector(pathSample, state.depth);
         bool takeSubsurfaceBranch = uSubsurfacePick < subsurfaceProbability;
@@ -264,6 +265,7 @@ void LightAdvanceBody(uint2 pixel, inout PathState state, Hit hit, GpuSurfaceHit
     }
 
     uint allowedLobeFlags = GetAllowedLobeFlags(state, surface);
+    state.flags &= ~PATH_FLAG_SKY_TRANSMISSION_RESOLVED;
     Ray nextRay;
     float3 weight;
     float bsdfPdf;
@@ -303,6 +305,7 @@ void LightAdvanceBody(uint2 pixel, inout PathState state, Hit hit, GpuSurfaceHit
 
     if (!sampledInteraction)
     {
+        state.flags |= PATH_FLAG_STOCHASTIC_SCATTER;
         ray.origin = surface.position + ray.direction * _SurfaceBias;
         ray.direction = SafeNormalize(ray.direction, surface.normal);
         SetPathRay(state, ray);
@@ -321,6 +324,10 @@ void LightAdvanceBody(uint2 pixel, inout PathState state, Hit hit, GpuSurfaceHit
         return;
     }
 
+    bool forcedDelta = allowedLobeFlags == BXDF_FLAG_REFLECTION || allowedLobeFlags == BXDF_FLAG_TRANSMISSION;
+    if ((sampleFlags & BXDF_FLAG_SPECULAR) == 0u || (!forcedDelta && (!IsDeltaSurface(surface) || SurfaceHasTransmissionSignal(surface))))
+        state.flags |= PATH_FLAG_STOCHASTIC_SCATTER;
+
     state.throughput *= weight;
     if (Max3(state.throughput) <= 1e-4)
     {
@@ -337,6 +344,7 @@ void LightAdvanceBody(uint2 pixel, inout PathState state, Hit hit, GpuSurfaceHit
 
     if (state.depth >= (uint) _RussianRouletteStart)
     {
+        state.flags |= PATH_FLAG_STOCHASTIC_SCATTER;
         float p = clamp(Max3(state.throughput), 0.05, 0.95);
         if (GetBounceRouletteSample(pathSample, state.depth) > p)
         {

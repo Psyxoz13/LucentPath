@@ -45,6 +45,7 @@ Texture2D<float4> _TransmissionGuide0;
 Texture2D<float4> _TransmissionGuide1;
 Texture2D<float4> _MCDlssSurfaceSignal;
 Texture2D<float4> _MCDlssReflectionSignal;
+Texture2D<float4> _FrameEmissionSum;
 Texture2D<float4> _MCDlssTransmissionSignal;
 RWTexture2D<float> _MCDlssTransparencyMask;
 RWTexture2D<float> _MCDlssBiasColorMask;
@@ -53,6 +54,7 @@ RWTexture2D<float2> _MCPreparedMotionVectors;
 
 int _Width;
 int _Height;
+int _SamplesPerPixel;
 float4 _MCPreparedViewToClipZ;
 float4 _MCPreparedMotionVectorScale;
 float _MCPreparedSkyDepth;
@@ -99,7 +101,8 @@ void SelectDlssGuides(
     float4 transmission = _MCDlssTransmissionSignal.Load(int3(pixel, 0));
 
     float surfaceWeight = ComputeDlssLuminance(surface.rgb);
-    float reflectionWeight = ComputeDlssLuminance(reflection.rgb);
+    float3 stableReflection = _FrameEmissionSum.Load(int3(pixel, 0)).rgb / max((float)_SamplesPerPixel, 1.0);
+    float reflectionWeight = ComputeDlssLuminance(reflection.rgb + stableReflection);
     float transmissionWeight = ComputeDlssLuminance(transmission.rgb);
 
     selectedGuide0 = primaryGuide0;

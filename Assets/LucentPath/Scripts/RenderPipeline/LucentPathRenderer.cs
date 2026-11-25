@@ -391,11 +391,11 @@ namespace LucentPath.Rendering
 
             var taaSettings = _resources.Asset.TaaSettings;
 
-            if (dlssSucceeded == false && taaSettings != null && taaSettings.IsEnabled && _resources.TaaResolve.Compute != null && state.FilterPing != null)
+            if (dlssSucceeded == false && taaSettings != null && taaSettings.IsEnabled && _resources.TaaResolve.Compute != null && state.FilterPing != null && state.FilterPong != null)
             {
                 if (_kernels.DispatchTaa(cmd, state, state.Result, state.FilterPing, state.IsValid, taaSettings.Feedback))
                 {
-                    cmd.CopyTexture(state.FilterPing.nameID, state.PrevResult.nameID);
+                    cmd.CopyTexture(state.FilterPong.nameID, state.PrevResult.nameID);
 
                     presentationSource = state.FilterPing;
                 }

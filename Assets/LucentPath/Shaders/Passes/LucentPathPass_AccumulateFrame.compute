@@ -311,6 +311,8 @@ void CSBuildLightingAliases(
         reflection.rgb *= scale.y;
     }
 
+    reflection.rgb += _FrameEmissionSum.Load(int3(pixel, 0)).rgb * invSpp;
+
     float indirectAlpha = max(reflection.a, transmission.a);
     float4 indirect = float4(reflection.rgb + transmission.rgb, indirectAlpha);
 
@@ -355,7 +357,6 @@ RWTexture2D<float4> _FrameSurfaceSignalSum;
 RWTexture2D<float4> _FrameReflectionSignalSum;
 RWTexture2D<float4> _FrameTransmissionSignalSum;
 RWTexture2D<float4> _FrameShadowSum;
-RWTexture2D<float4> _FrameEmissionSum;
 Texture2D<float4> _Guide0;
 Texture2D<float4> _Guide1;
 Texture2D<float4> _Guide2;
@@ -406,7 +407,6 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
     float4 reflectionSum = 0.0;
     float4 transmissionSum = 0.0;
     float shadowSum = 0.0;
-    float4 emissionSum = 0.0;
     float weightSum = 0.0;
     float sameSurfaceWeight = 0.0;
 
@@ -443,7 +443,6 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
             reflectionSum += _FrameReflectionSignalSum[samplePixel];
             transmissionSum += _FrameTransmissionSignalSum[samplePixel];
             shadowSum += sampleShadowSums.r;
-            emissionSum += _FrameEmissionSum[samplePixel];
             weightSum += 1.0;
         }
     }
@@ -461,8 +460,5 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
     // Both values denote a reconstruction. Only 1 is suitable for estimating center-surface luminance.
     shadowSums.a = hasUnmixedReconstruction ? 1.0 : 2.0;
     _FrameShadowSum[pixel] = shadowSums;
-    float4 emission = emissionSum * invWeight;
-    emission.a = _FrameEmissionSum[pixel].a;
-    _FrameEmissionSum[pixel] = emission;
 }
 #endif

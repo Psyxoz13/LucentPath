@@ -81,15 +81,6 @@ float3 ResolveSecondaryProjectDirectionToUvWithValidity(float3 cameraPosition, f
     return float3(clip.xy * invW * 0.5 + 0.5, valid);
 }
 
-GpuSecondaryGuideEvent ResolveSecondaryLoadPrevReflectionEvent(int2 pixel)
-{
-    return UnpackSecondaryGuideEvent(
-        _PrevReflectionGuideEvent0.Load(int3(pixel, 0)),
-        _PrevReflectionGuideEvent1.Load(int3(pixel, 0)),
-        _PrevReflectionGuideEvent2.Load(int3(pixel, 0)),
-        _PrevReflectionGuideEvent3.Load(int3(pixel, 0)));
-}
-
 GpuSecondaryGuideEvent ResolveSecondaryLoadPrevTransmissionEvent(int2 pixel)
 {
     return UnpackSecondaryGuideEvent(
@@ -104,7 +95,7 @@ SecondaryGuideSample ResolveSecondaryMakeInvalidGuide()
     SecondaryGuideSample guide;
     guide.guide0 = float4(0.0, 1.0, 0.0, -1.0);
     guide.guide1 = float4(0.0, 0.0, -1.0, 0.0);
-    guide.guide2 = float4(GUIDE_PATH_KIND_PRIMARY, 0.0, 0.0, 0.0);
+    guide.guide2 = float4(GUIDE_PATH_KIND_PRIMARY, 0.0, -1.0, 0.0);
     return guide;
 }
 
@@ -130,44 +121,27 @@ SecondaryGuideSample ResolveSecondaryMakePrimaryReflectionFallbackGuide(uint2 pi
     SecondaryGuideSample guide;
     guide.guide0 = _Guide0.Load(int3(pixel, 0));
     guide.guide1 = _Guide1.Load(int3(pixel, 0));
-    guide.guide2 = float4(GUIDE_PATH_KIND_SPECULAR, saturate(_PrimaryRoughness.Load(int3(pixel, 0))), 0.0, 0.0);
+    guide.guide2 = float4(GUIDE_PATH_KIND_SPECULAR, saturate(_PrimaryRoughness.Load(int3(pixel, 0))), -1.0, 0.0);
     return guide;
 }
 
 SecondaryGuideSample ResolveSecondaryMakePrimaryProjectedReflectionSkyGuide(uint2 pixel, GpuSecondaryGuideEvent currentEvent)
 {
     float2 currentUv = RemoveCameraJitterFromUv((float2(pixel) + 0.5) / float2(_Width, _Height));
-    Ray primaryRay = GenerateGuideCameraRay(pixel);
     float4 primaryGuide1 = _Guide1.Load(int3(pixel, 0));
-    float2 primaryPrevUv = currentUv - primaryGuide1.xy;
-    float3 targetGuideVector = SafeNormalize(currentEvent.worldNormalOrDirection, float3(0.0, 1.0, 0.0));
-    float primaryHitDistance = max(_PrimaryHitDistance[pixel], 0.0);
-    float3 primaryHitPosition = primaryRay.origin + primaryRay.direction * primaryHitDistance;
-    float3 primaryCameraPrevProjection = ResolveSecondaryProjectWorldToUvWithValidity(primaryHitPosition, _PrevViewProjMatrix);
-    float3 skyPrevProjection = ResolveSecondaryProjectDirectionToUvWithValidity(_PrevCameraWorldPos.xyz, currentEvent.worldNormalOrDirection, _PrevViewProjMatrix);
-
-    float2 prevUv = currentUv;
-    bool resolved = false;
-    if (primaryCameraPrevProjection.z > 0.5 && skyPrevProjection.z > 0.5)
+    float2 prevUv = currentUv - primaryGuide1.xy;
+    if (_IsOrthographic == 0)
     {
-        float2 primaryObjectMotionUv = primaryPrevUv - primaryCameraPrevProjection.xy;
-        float2 projectedPrevUv = skyPrevProjection.xy + primaryObjectMotionUv;
-        if (ResolveSecondaryIsUvInside(projectedPrevUv))
-        {
-            prevUv = projectedPrevUv;
-            resolved = true;
-        }
-    }
-    if (!resolved && skyPrevProjection.z > 0.5 && ResolveSecondaryIsUvInside(skyPrevProjection.xy))
-    {
-        prevUv = skyPrevProjection.xy;
-        resolved = true;
+        Ray primaryRay = GenerateGuideCameraRay(pixel);
+        float4 prevClip = mul(_PrevViewProjMatrix, float4(primaryRay.direction, 0.0));
+        prevUv = prevClip.w > 1e-6 ? prevClip.xy / prevClip.w * 0.5 + 0.5 : float2(-1.0, -1.0);
     }
 
+    float3 skyDirection = SafeNormalize(currentEvent.worldNormalOrDirection, float3(0.0, 1.0, 0.0));
     SecondaryGuideSample guide;
-    guide.guide0 = float4(targetGuideVector, -1.0);
-    guide.guide1 = resolved ? float4(currentUv - prevUv, -1.0, 0.0) : float4(0.0, 0.0, -1.0, 0.0);
-    guide.guide2 = float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), (float)currentEvent.flags, 0.0);
+    guide.guide0 = float4(skyDirection, -1.0);
+    guide.guide1 = float4(currentUv - prevUv, primaryGuide1.zw);
+    guide.guide2 = float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), primaryGuide1.z, 0.0);
     return guide;
 }
 
@@ -297,9 +271,16 @@ SecondaryGuideSample ResolveSecondaryMakeCurrentOnlyGuide(
     SecondaryGuideSample guide;
     guide.guide0 = float4(SafeNormalize(currentEvent.worldNormalOrDirection, float3(0.0, 1.0, 0.0)), skyEvent ? -1.0 : currentDepth);
     guide.guide1 = float4(0.0, 0.0, skyEvent ? -1.0 : (float)currentEvent.stableId, (float)currentEvent.historyVersion);
-    guide.guide2 = reflectionChannel
-        ? float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), (float)currentEvent.flags, -currentDepth)
-        : float4((float)currentEvent.pathKind, max(currentEvent.eta, 1.0), (float)currentEvent.mediumState, -currentDepth);
+    if (reflectionChannel)
+    {
+        float2 currentUv = RemoveCameraJitterFromUv((float2(pixel) + 0.5) / float2(_Width, _Height));
+        guide.guide1.xy = currentUv - float2(-1.0, -1.0);
+        guide.guide2 = float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), _Guide1.Load(int3(pixel, 0)).z, -currentDepth);
+    }
+    else
+    {
+        guide.guide2 = float4((float)currentEvent.pathKind, max(currentEvent.eta, 1.0), (float)currentEvent.mediumState, -currentDepth);
+    }
     return guide;
 }
 
@@ -341,26 +322,19 @@ SecondaryGuideSample ResolveSecondaryMakeGuide(uint2 pixel, GpuSecondaryGuideEve
 
     float2 prevUv = prevProjection.xy;
 
-    int2 prevPixel = ResolveSecondaryUvToPixel(ToPrevJitteredUv(prevUv));
-    GpuSecondaryGuideEvent prevEvent;
-    if (reflectionChannel)
-        prevEvent = ResolveSecondaryLoadPrevReflectionEvent(prevPixel);
-    else
-        prevEvent = ResolveSecondaryLoadPrevTransmissionEvent(prevPixel);
-    if (ResolveSecondarySameEventChain(currentEvent, prevEvent))
+    if (!reflectionChannel && (primaryVirtualTransmission || currentEvent.previousPositionValid == 0u))
     {
-        expectedPrevDepth = primaryVirtualTransmission
-            ? ResolveSecondaryViewDepth(prevEvent.worldPosition, _PrevViewMatrix)
-            : (currentEvent.previousPositionValid != 0u
-                ? ResolveSecondaryViewDepth(currentEvent.previousWorldPosition, _PrevViewMatrix)
-                : ResolveSecondaryViewDepth(prevEvent.worldPosition, _PrevViewMatrix));
+        int2 prevPixel = ResolveSecondaryUvToPixel(ToPrevJitteredUv(prevUv));
+        GpuSecondaryGuideEvent prevEvent = ResolveSecondaryLoadPrevTransmissionEvent(prevPixel);
+        if (ResolveSecondarySameEventChain(currentEvent, prevEvent))
+            expectedPrevDepth = ResolveSecondaryViewDepth(prevEvent.worldPosition, _PrevViewMatrix);
     }
 
     SecondaryGuideSample guide;
     guide.guide0 = float4(SafeNormalize(currentEvent.worldNormalOrDirection, float3(0.0, 1.0, 0.0)), skyEvent ? -1.0 : currentDepth);
     guide.guide1 = float4(currentUv - prevUv, (float)currentEvent.stableId, (float)currentEvent.historyVersion);
     guide.guide2 = reflectionChannel
-        ? float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), (float)currentEvent.flags, expectedPrevDepth - currentDepth)
+        ? float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), _Guide1.Load(int3(pixel, 0)).z, expectedPrevDepth - currentDepth)
         : float4((float)currentEvent.pathKind, max(currentEvent.eta, 1.0), (float)currentEvent.mediumState, expectedPrevDepth - currentDepth);
     return guide;
 }

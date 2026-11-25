@@ -245,25 +245,27 @@ bool ValidateReflectionHistory(
 
     bool currentSky = IsSkyGuide(currentGuide0);
     bool prevSky = IsSkyGuide(prevGuide0);
-    if (currentSky || prevSky)
-    {
-        bool validSkyHistory = currentSky == prevSky;
-        relativeDepthDelta = validSkyHistory ? 0.0 : 1.0;
-        directionAgreement = validSkyHistory ? 1.0 : 0.0;
-        return validSkyHistory;
-    }
+    if (currentSky != prevSky)
+        return false;
 
     if (!HasValidSecondaryIdentity(currentGuide1) || !HasValidSecondaryIdentity(prevGuide1))
         return false;
-    if (!SameSurfaceIdentity(currentGuide1, prevGuide1))
+    if (currentGuide2.z != prevGuide2.z || !SameSurfaceIdentity(currentGuide1, prevGuide1))
         return false;
 
-    EvaluateGuideMatch(currentGuide0, currentGuide2, prevGuide0, prevGuide2, relativeDepthDelta, directionAgreement);
     float roughness = saturate(currentGuide2.y);
-    float directionThreshold = lerp(0.995, _TemporalNormalRejectThreshold, roughness);
+    float directionThreshold = max(lerp(0.995, _TemporalNormalRejectThreshold, roughness), _TemporalNormalRejectThreshold);
+    if (currentSky)
+    {
+        relativeDepthDelta = 0.0;
+        directionAgreement = dot(SafeNormalize(currentGuide0.xyz), SafeNormalize(prevGuide0.xyz));
+        return directionAgreement >= directionThreshold;
+    }
+
+    EvaluateGuideMatch(currentGuide0, currentGuide2, prevGuide0, prevGuide2, relativeDepthDelta, directionAgreement);
     float depthThreshold = _TemporalDepthRejectThreshold * lerp(0.5, 2.0, roughness);
     return relativeDepthDelta <= max(depthThreshold, 1e-4) &&
-        directionAgreement >= max(directionThreshold, _TemporalNormalRejectThreshold);
+        directionAgreement >= directionThreshold;
 }
 
 bool ValidateTransmissionHistory(
@@ -808,7 +810,7 @@ bool BilinearReprojectHistory(
     out float4 historySignal,
     out float4 historyMoments,
     out float prevHitMask,
-    out float surfaceOwnerCoverage,
+    out float historyFootprintCoverage,
     out float relativeDepthDelta,
     out float normalAgreement,
     out int2 resolvedPrevPixel)
@@ -816,7 +818,7 @@ bool BilinearReprojectHistory(
     historySignal = 0.0;
     historyMoments = 0.0;
     prevHitMask = 0.0;
-    surfaceOwnerCoverage = 0.0;
+    historyFootprintCoverage = 0.0;
     relativeDepthDelta = 1.0;
     normalAgreement = 0.0;
 
@@ -851,7 +853,7 @@ bool BilinearReprojectHistory(
         float4 tapGuide2 = LoadPrevGuide2(guideKind, tapPixel);
 
         if (guideKind == SIGNAL_GUIDE_SURFACE && tapGuide1.z == currentGuide1.z)
-            surfaceOwnerCoverage += weight;
+            historyFootprintCoverage += weight;
 
         float tapRelativeDepthDelta;
         float tapNormalAgreement;
@@ -874,6 +876,9 @@ bool BilinearReprojectHistory(
 
     if (weightSum <= 1e-4)
         return false;
+
+    if (guideKind == SIGNAL_GUIDE_REFLECTION)
+        historyFootprintCoverage = weightSum;
 
     float invWeightSum = rcp(weightSum);
     historySignal = signalSum * invWeightSum;
@@ -1022,20 +1027,14 @@ bool ResolveSignalHistory(
     float4 currentGuide2,
     float4 currentSignal,
     inout float4 accumulatedSignal,
-    out float4 previousSignal,
-    inout float4 previousMoments,
     out float4 signalMoments,
     out float historyConfidence,
-    out float effectivePrevHistoryLength,
     out float historyAlpha,
     out int2 resolvedPrevPixel,
     bool foldCurrentSample)
 {
-    previousSignal = currentSignal;
-    previousMoments = BuildInitialMoments(currentSignal);
     signalMoments = BuildInitialMoments(currentSignal);
     historyConfidence = 0.0;
-    effectivePrevHistoryLength = 0.0;
     historyAlpha = 1.0;
     resolvedPrevPixel = int2(pixel);
     accumulatedSignal = currentSignal;
@@ -1044,12 +1043,15 @@ bool ResolveSignalHistory(
         return false;
 
     float2 currentUv = GetCurrentUv(pixel);
-    float2 prevUv = GetHistoryUv(currentUv, currentGuide1.xy);
+    float2 historyUv = GetHistoryUv(currentUv, currentGuide1.xy);
     bool skyHistory = IsSkyGuide(currentGuide0);
-    float2 historyUv = skyHistory && !IsUvInsideHistory(prevUv) ? currentUv : prevUv;
+    if (!IsUvInsideHistory(historyUv))
+    {
+        if (!skyHistory || guideKind == SIGNAL_GUIDE_REFLECTION)
+            return false;
 
-    if (!IsUvInsideHistory(prevUv) && !skyHistory)
-        return false;
+        historyUv = currentUv;
+    }
 
     float relativeDepthDelta = 1.0;
     float normalAgreement = 0.0;
@@ -1057,12 +1059,12 @@ bool ResolveSignalHistory(
     float4 historySignal;
     float4 historyMoments;
     float prevHitMaskForHistoryPixel;
-    float surfaceOwnerCoverage;
+    float historyFootprintCoverage;
 
     if (!BilinearReprojectHistory(
         guideKind, signalKind, historyUv,
         currentGuide0, currentGuide1, currentGuide2,
-        historySignal, historyMoments, prevHitMaskForHistoryPixel, surfaceOwnerCoverage,
+        historySignal, historyMoments, prevHitMaskForHistoryPixel, historyFootprintCoverage,
         relativeDepthDelta, normalAgreement, bestHistoryPixel))
     {
         return false;
@@ -1076,9 +1078,11 @@ bool ResolveSignalHistory(
     float normalConfidence = ComputeNormalConfidence(normalAgreement);
     float motionConfidence = ComputeMotionConfidence(motionPixels);
 
-    historyConfidence = ApplyHistoryConfidenceCurve(
-        pixel, signalKind,
-        depthConfidence * normalConfidence * motionConfidence);
+    float confidence = depthConfidence * normalConfidence * motionConfidence;
+    if (signalKind == PATH_SIGNAL_REFLECTION && (prevHistoryLength <= 0.0 || confidence <= 0.0))
+        return false;
+
+    historyConfidence = ApplyHistoryConfidenceCurve(pixel, signalKind, confidence);
 
     if (signalKind == PATH_SIGNAL_SURFACE)
     {
@@ -1191,27 +1195,35 @@ bool ResolveSignalHistory(
     }
 #endif
 
-    previousSignal = historySignal;
-    previousMoments = historyMoments;
+    if (signalKind == PATH_SIGNAL_REFLECTION && historyConfidence <= 0.0)
+        return false;
 
     float currentWeight = foldCurrentSample ? 1.0 : 0.0;
     if (signalKind == PATH_SIGNAL_SURFACE && (foldCurrentSample || _FrameShadowSum.Load(int3(pixel, 0)).a > 0.0))
     {
         // Footprint quality shortens the effective history instead of injecting
         // an uncovered color fraction from a single noisy observation.
-        float coverage = saturate(surfaceOwnerCoverage);
+        float coverage = saturate(historyFootprintCoverage);
         historyConfidence *= sqrt(coverage);
         if (!foldCurrentSample)
             currentWeight = 1.0 - coverage;
     }
 
-    effectivePrevHistoryLength = prevHistoryLength * historyConfidence;
+    float effectivePrevHistoryLength = prevHistoryLength * historyConfidence;
     float totalSamples = effectivePrevHistoryLength + currentWeight;
     historyAlpha = currentWeight > 0.0 ? currentWeight / totalSamples : 0.0;
     // A reconstructed checkerboard observation does not add to the age.
     float historyLength = foldCurrentSample ? min(totalSamples, (float)_MaxHistoryLength) : prevHistoryLength;
+    if (signalKind == PATH_SIGNAL_REFLECTION)
+    {
+        historyAlpha = lerp(1.0, historyAlpha, saturate(historyFootprintCoverage));
+        float footprintLimitedLength = rcp(max(historyAlpha, rcp(max((float)_MaxHistoryLength, 1.0))));
+        historyLength = foldCurrentSample
+            ? footprintLimitedLength
+            : max(1.0, min(effectivePrevHistoryLength, footprintLimitedLength));
+    }
 
-    accumulatedSignal = lerp(previousSignal, currentSignal, historyAlpha);
+    accumulatedSignal = lerp(historySignal, currentSignal, historyAlpha);
 
     float currentLuminance = ComputeLuminance(currentSignal.rgb);
     float moment1 = lerp(historyMoments.x, currentLuminance, historyAlpha);
@@ -1291,18 +1303,12 @@ void AccumulateFrameBody(uint3 id)
     float4 accumulatedTransmission = currentTransmission;
     float accumulatedHitMask = currentHitMask;
 
-    float4 previousSurface = currentSurface;
-    float4 previousReflection = currentReflection;
-    float4 previousTransmission = currentTransmission;
     float4 surfaceMoments = BuildInitialMoments(currentSurface);
     float4 reflectionMoments = BuildInitialMoments(currentReflection);
     float4 transmissionMoments = BuildInitialMoments(currentTransmission);
     float surfaceHistoryConfidence = 0.0;
     float reflectionHistoryConfidence = 0.0;
     float transmissionHistoryConfidence = 0.0;
-    float surfaceEffectivePrevHistoryLength = 0.0;
-    float reflectionEffectivePrevHistoryLength = 0.0;
-    float transmissionEffectivePrevHistoryLength = 0.0;
     float surfaceHistoryAlpha = 1.0;
     float reflectionHistoryAlpha = 1.0;
     float transmissionHistoryAlpha = 1.0;
@@ -1319,11 +1325,8 @@ void AccumulateFrameBody(uint3 id)
         currentGuide2,
         currentSurface,
         accumulatedSurface,
-        previousSurface,
-        surfaceMoments,
         surfaceMoments,
         surfaceHistoryConfidence,
-        surfaceEffectivePrevHistoryLength,
         surfaceHistoryAlpha,
         surfacePrevPixel,
         foldCurrentSample);
@@ -1340,11 +1343,8 @@ void AccumulateFrameBody(uint3 id)
             currentReflectionGuide2,
             currentReflection,
             accumulatedReflection,
-            previousReflection,
-            reflectionMoments,
             reflectionMoments,
             reflectionHistoryConfidence,
-            reflectionEffectivePrevHistoryLength,
             reflectionHistoryAlpha,
             reflectionPrevPixel,
             foldCurrentSample);
@@ -1362,11 +1362,8 @@ void AccumulateFrameBody(uint3 id)
             currentTransmissionGuide2,
             currentTransmission,
             accumulatedTransmission,
-            previousTransmission,
-            transmissionMoments,
             transmissionMoments,
             transmissionHistoryConfidence,
-            transmissionEffectivePrevHistoryLength,
             transmissionHistoryAlpha,
             transmissionPrevPixel,
             foldCurrentSample);
@@ -1598,14 +1595,10 @@ void AccumulateSecondaryCompacted(uint2 pixel)
 
     float4 accumulatedReflection = currentReflection;
     float4 accumulatedTransmission = currentTransmission;
-    float4 previousReflection = currentReflection;
-    float4 previousTransmission = currentTransmission;
     float4 reflectionMoments = BuildInitialMoments(currentReflection);
     float4 transmissionMoments = BuildInitialMoments(currentTransmission);
     float reflectionHistoryConfidence = 0.0;
     float transmissionHistoryConfidence = 0.0;
-    float reflectionEffectivePrevHistoryLength = 0.0;
-    float transmissionEffectivePrevHistoryLength = 0.0;
     float reflectionHistoryAlpha = 1.0;
     float transmissionHistoryAlpha = 1.0;
     int2 reflectionPrevPixel = pixelInt;
@@ -1620,14 +1613,11 @@ void AccumulateSecondaryCompacted(uint2 pixel)
         currentReflectionGuide2,
         currentReflection,
         accumulatedReflection,
-        previousReflection,
-        reflectionMoments,
         reflectionMoments,
         reflectionHistoryConfidence,
-        reflectionEffectivePrevHistoryLength,
         reflectionHistoryAlpha,
         reflectionPrevPixel,
-        true);
+        CheckerboardShadePixel(pixel));
 
     bool transmissionHistoryAccepted = ResolveSignalHistory(
         SIGNAL_GUIDE_TRANSMISSION,
@@ -1638,11 +1628,8 @@ void AccumulateSecondaryCompacted(uint2 pixel)
         currentTransmissionGuide2,
         currentTransmission,
         accumulatedTransmission,
-        previousTransmission,
-        transmissionMoments,
         transmissionMoments,
         transmissionHistoryConfidence,
-        transmissionEffectivePrevHistoryLength,
         transmissionHistoryAlpha,
         transmissionPrevPixel,
         true);

@@ -272,7 +272,7 @@ DxrGuideSample DxrEvaluatePrimaryGuide(uint2 pixel, Ray primaryRay, RayPayload p
         if (!truePrimaryWritten)
         {
             if (Max3(surface.emission) > 0.0)
-                _FrameEmissionSum[pixel] = float4(0.0, 0.0, 0.0, 1.0);
+                MarkFramePrimaryEmission(pixel);
 
             truePrimaryGuide = DxrMakeSurfaceGuide(currentUv, surface, surfaceHit);
             primaryRoughness = SurfaceGuideRoughness(surface);
@@ -357,7 +357,7 @@ void DxrApplyPrimaryReflectionSkySplit(uint2 pixel, Ray ray, SurfaceData surface
 
     float3 wo = SafeNormalize(-ray.direction, surface.normal);
     float primaryReflectionEnvLod = saturate(SurfaceGuideRoughness(surface)) * (float)_EnvironmentMaxMip;
-    AccumulateFrameReflectionSignal(pixel, state, state.throughput * ComputePrimaryReflectionWeight(surface, wo) * EvaluateEnvironmentRadianceLod(reflectionRay.direction, primaryReflectionEnvLod));
+    AccumulateFrameStableReflection(pixel, state.throughput * ComputePrimaryReflectionWeight(surface, wo) * EvaluateEnvironmentRadianceLod(reflectionRay.direction, primaryReflectionEnvLod));
     SetPrimaryReflectionSkySplit(state, true);
 }
 
@@ -514,7 +514,7 @@ void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray
         {
             WRITE_PRIMARY_DEMODULATORS(pixelIndex, surface);
             if (Max3(surface.emission) > 0.0)
-                _FrameEmissionSum[pixelIndex] = float4(0.0, 0.0, 0.0, 1.0);
+                MarkFramePrimaryEmission(pixelIndex);
         }
         else
         {
@@ -544,7 +544,7 @@ void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray
         state.maxBouncesForPath = (uint)max(SelectPathBounceBudget(surface, primaryHasTransmission), 1);
         DxrApplyPrimaryReflectionSkySplit(pixelIndex, ray, surface, state);
 
-        if (shadeThisFrame && IsDeltaDielectricPlaneSplit(surface))
+        if ((shadeThisFrame || HasPrimarySkyReflectionGuide(pixelIndex)) && IsDeltaDielectricPlaneSplit(surface))
         {
             AppendDeltaReflectionPath(pathIndex);
         }
@@ -559,6 +559,43 @@ void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray
 
     if (!shadeThisFrame)
         SetPathActive(state, false);
+}
+
+void DxrResolveDeltaTransmissionToSky(uint2 pixel, SurfaceData surface, inout PathState state)
+{
+    if (_PathPlane != PATH_PLANE_SECOND_DELTA_REFLECTION || state.depth != 2u ||
+        state.depth >= state.maxBouncesForPath || GetPathSignalKind(state) != PATH_SIGNAL_REFLECTION ||
+        (state.flags & PATH_FLAG_STOCHASTIC_SCATTER) != 0u || !HasPrimarySkyReflectionGuide(pixel) ||
+        !IsDeltaDielectricPlaneSplit(surface) || GetAllowedLobeFlags(state, surface) != BXDF_FLAG_ALL)
+        return;
+
+    ShadingFrame frame = ComputeShadingFrame(surface);
+    OrientShadingFrameForView(frame, surface.interaction.wo);
+    PathSampler sampler = CreatePathSampler(pixel, (uint)_CurrentSampleIndex);
+    Ray skyRay;
+    float3 weight;
+    float bsdfPdf;
+    uint sampleFlags;
+    bool dielectricTransmission;
+    bool frontFace;
+    if (!SampleSurfaceInteractionWithBSDF(surface, frame, ComputeLobeSet(surface), sampler, state.depth,
+        BXDF_FLAG_TRANSMISSION, skyRay, weight, bsdfPdf, sampleFlags, dielectricTransmission, frontFace) ||
+        (sampleFlags & (BXDF_FLAG_TRANSMISSION | BXDF_FLAG_SPECULAR)) != (BXDF_FLAG_TRANSMISSION | BXDF_FLAG_SPECULAR))
+        return;
+
+    RayPayload payload = TraceScene(skyRay.origin, skyRay.direction, _SurfaceBias, max(skyRay.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
+    if (GetRayPayloadHit(payload) != 0u)
+        return;
+
+    float lightDistance;
+    float3 lightRadiance;
+    float lightPdf;
+    if (FindClosestAnalyticAreaLightHit(skyRay, skyRay.maxDistance, lightDistance, lightRadiance, lightPdf))
+        return;
+
+    float3 radiance = state.throughput * weight * EvaluateEnvironmentRadianceLod(skyRay.direction, 0.0);
+    AccumulateDeterministicSkyReflection(pixel, radiance, state.depth + 1u);
+    state.flags |= PATH_FLAG_SKY_TRANSMISSION_RESOLVED;
 }
 
 void DxrTraceAndResolveBounce(uint2 pixelIndex, uint pathIndex, inout PathState state, out Hit hit, out GpuSurfaceHit surfaceHit)
@@ -591,6 +628,7 @@ void DxrTraceAndResolveBounce(uint2 pixelIndex, uint pathIndex, inout PathState 
     uint stableId = surfaceHit.instanceId;
     uint historyVersion = 0u;
     ResolveSurfaceTerminal(pixelIndex, ray, surface, stableId, historyVersion, GetSurfaceHitFlags(surfaceHit), state);
+    DxrResolveDeltaTransmissionToSky(pixelIndex, surface, state);
 
     if (state.depth >= state.maxBouncesForPath)
         SetPathActive(state, false);

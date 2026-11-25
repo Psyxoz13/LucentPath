@@ -6,7 +6,14 @@ Texture2D<float4> _TaaCurrentColor;
 Texture2D<float4> _TaaPrevColor;
 Texture2D<float4> _TaaMotionGuide;
 Texture2D<float4> _TaaPrevSurfaceGuide;
+Texture2D<float4> _ReflectionGuide1;
+Texture2D<float4> _ReflectionGuide2;
+Texture2D<float4> _FrameEmissionSum;
 RWTexture2D<float4> _TaaOutput;
+RWTexture2D<float4> _TaaHistoryOutput;
+
+int _SamplesPerPixel;
+int _DebugVisualizationMode;
 
 int _Width;
 int _Height;
@@ -92,6 +99,20 @@ bool TryLoadTaaHistory(float2 prevUv, float surfaceOwner, int2 size, out float3 
     return true;
 }
 
+float3 TaaStableReflection(int2 pixel)
+{
+    if (_DebugVisualizationMode != 0 && _DebugVisualizationMode != 2)
+        return 0.0;
+
+    return _FrameEmissionSum.Load(int3(pixel, 0)).rgb / max((float)_SamplesPerPixel, 1.0);
+}
+
+void StoreTaaResult(int2 pixel, float3 history, float3 stableReflection, float alpha)
+{
+    _TaaHistoryOutput[pixel] = float4(history, alpha);
+    _TaaOutput[pixel] = float4(history + stableReflection, alpha);
+}
+
 [numthreads(8, 8, 1)]
 void CSTaaResolve(uint3 id : SV_DispatchThreadID)
 {
@@ -100,15 +121,32 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
 
     int2 pixel = int2(id.xy);
     float4 current = _TaaCurrentColor.Load(int3(pixel, 0));
+    float3 stableReflection = TaaStableReflection(pixel);
+    current.rgb = max(current.rgb - stableReflection, 0.0);
     float4 currentGuide = _TaaMotionGuide.Load(int3(pixel, 0));
 
     if (_HasValidHistory == 0)
     {
-        _TaaOutput[pixel] = current;
+        StoreTaaResult(pixel, current.rgb, stableReflection, current.a);
         return;
     }
 
     int2 size = int2(_Width, _Height);
+    float reflectionCompatibility = 1.0;
+    float4 reflectionGuide2 = _ReflectionGuide2.Load(int3(pixel, 0));
+    if (reflectionGuide2.z >= 0.0)
+    {
+        float2 reflectionMotion = _ReflectionGuide1.Load(int3(pixel, 0)).xy;
+        float2 footprintOverlap = saturate(1.0 - abs((reflectionMotion - currentGuide.xy) * float2(size)));
+        reflectionCompatibility = lerp(footprintOverlap.x * footprintOverlap.y, 1.0, saturate(reflectionGuide2.y));
+    }
+
+    if (reflectionCompatibility <= 0.0)
+    {
+        StoreTaaResult(pixel, current.rgb, stableReflection, current.a);
+        return;
+    }
+
     float2 currentUv = (float2(pixel) + 0.5) / float2(size);
     // Same unjittered motion convention as Surface reprojection.
     float2 prevUv = currentUv + _CameraJitterUv - currentGuide.xy - _PrevCameraJitterUv;
@@ -117,7 +155,7 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
     if (any(prevUv < 0.0) || any(prevUv > 1.0) ||
         !TryLoadTaaHistory(prevUv, currentGuide.z, size, previousColor, coverage))
     {
-        _TaaOutput[pixel] = current;
+        StoreTaaResult(pixel, current.rgb, stableReflection, current.a);
         return;
     }
 
@@ -145,7 +183,7 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
             if (sampleGuide.z != currentGuide.z)
                 continue;
 
-            float3 neighbor = RgbToYCoCg(max(_TaaCurrentColor.Load(int3(samplePixel, 0)).rgb, 0.0));
+            float3 neighbor = RgbToYCoCg(max(_TaaCurrentColor.Load(int3(samplePixel, 0)).rgb - TaaStableReflection(samplePixel), 0.0));
             minColor = min(minColor, neighbor);
             maxColor = max(maxColor, neighbor);
             sumColor += neighbor;
@@ -173,10 +211,10 @@ void CSTaaResolve(uint3 id : SV_DispatchThreadID)
     float motionPixels = length(currentGuide.xy * float2(size));
     float baseFeedback = saturate(_TaaFeedback);
     float staticFeedback = max(baseFeedback, 0.985);
-    float feedback = lerp(staticFeedback, baseFeedback, saturate(motionPixels)) * saturate(coverage);
+    float feedback = lerp(staticFeedback, baseFeedback, saturate(motionPixels)) * saturate(coverage) * reflectionCompatibility;
     float3 blended = lerp(current.rgb, historyColor, feedback);
 
-    _TaaOutput[pixel] = float4(blended, current.a);
+    StoreTaaResult(pixel, blended, stableReflection, current.a);
 }
 
 [numthreads(ANTI_FIREFLY_GROUP_SIZE, ANTI_FIREFLY_GROUP_SIZE, 1)]

@@ -60,6 +60,9 @@ bool IsDeltaDielectricPlaneSplit(SurfaceData surface)
 
 uint GetAllowedLobeFlags(PathState state, SurfaceData surface)
 {
+    if ((state.flags & PATH_FLAG_SKY_TRANSMISSION_RESOLVED) != 0u)
+        return BXDF_FLAG_REFLECTION;
+
     if (state.depth > 1u || IsDeltaDielectricPlaneSplit(surface) == false)
     {
         return state.depth == 1u && _PathPlane == PATH_PLANE_SECOND_DELTA_REFLECTION ? 0u : BXDF_FLAG_ALL;

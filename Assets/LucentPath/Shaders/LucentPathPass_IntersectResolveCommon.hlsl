@@ -3,7 +3,19 @@
 
 #define LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY 2147483648u
 
+bool HasPrimarySkyReflectionGuide(uint2 pixel)
+{
+    return (_ReflectionGuideEvent3[pixel].z & LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY) != 0u;
+}
+
 void StoreSecondaryTerminalGuideEvent(uint2 pixel, uint signalKind, Ray ray, float terminalDistance, uint stableId, uint flags, PathState state);
+
+void AccumulateDeterministicSkyReflection(uint2 pixel, float3 radiance, uint depth)
+{
+    float cap = _IndirectClampMultiplierReflection *
+        max(_IndirectClampHistoryLutReflection.SampleLevel(indirect_lut_linear_clamp_sampler, float2(1.0, 0.5), 0).r, 0.0);
+    AccumulateFrameStableReflection(pixel, ClampToCap(radiance, depth, cap));
+}
 
 void AccumulateTerminalRadiance(
     uint2 pixel,
@@ -25,7 +37,16 @@ void AccumulateTerminalRadiance(
     }
 
     if (allowSecondarySignal)
-        AccumulateFrameSignal(pixel, state, signalKind, radiance);
+    {
+        bool stableSky = signalKind == PATH_SIGNAL_REFLECTION &&
+            (flags & LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY) != 0u &&
+            (state.flags & PATH_FLAG_STOCHASTIC_SCATTER) == 0u &&
+            HasPrimarySkyReflectionGuide(pixel);
+        if (stableSky)
+            AccumulateDeterministicSkyReflection(pixel, radiance, state.depth);
+        else
+            AccumulateFrameSignal(pixel, state, signalKind, radiance);
+    }
 
     StoreSecondaryTerminalGuideEvent(pixel, signalKind, ray, terminalDistance, stableId, flags, state);
 }

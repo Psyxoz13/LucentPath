@@ -632,10 +632,6 @@ namespace LucentPath.Rendering
             cmd.SetComputeTextureParam(compute, kernel, ReflectionGuideEvent1Property, state.ReflectionGuideEvent.Event1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, ReflectionGuideEvent2Property, state.ReflectionGuideEvent.Event2.nameID);
             cmd.SetComputeTextureParam(compute, kernel, ReflectionGuideEvent3Property, state.ReflectionGuideEvent.Event3.nameID);
-            cmd.SetComputeTextureParam(compute, kernel, PrevReflectionGuideEvent0Property, state.ReflectionGuideEvent.PrevEvent0.nameID);
-            cmd.SetComputeTextureParam(compute, kernel, PrevReflectionGuideEvent1Property, state.ReflectionGuideEvent.PrevEvent1.nameID);
-            cmd.SetComputeTextureParam(compute, kernel, PrevReflectionGuideEvent2Property, state.ReflectionGuideEvent.PrevEvent2.nameID);
-            cmd.SetComputeTextureParam(compute, kernel, PrevReflectionGuideEvent3Property, state.ReflectionGuideEvent.PrevEvent3.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TransmissionGuideEvent0Property, state.TransmissionGuideEvent.Event0.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TransmissionGuideEvent1Property, state.TransmissionGuideEvent.Event1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TransmissionGuideEvent2Property, state.TransmissionGuideEvent.Event2.nameID);
@@ -765,7 +761,6 @@ namespace LucentPath.Rendering
             cmd.SetComputeTextureParam(compute, kernel, FrameReflectionSignalSumProperty, state.FrameReflectionSignalSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, FrameTransmissionSignalSumProperty, state.FrameTransmissionSignalSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, FrameShadowSumUavProperty, state.FrameShadowSum.nameID);
-            cmd.SetComputeTextureParam(compute, kernel, FrameEmissionSumProperty, state.FrameEmissionSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, Guide0Property, state.SurfaceSignal.Guide0.nameID);
             cmd.SetComputeTextureParam(compute, kernel, Guide1Property, state.SurfaceSignal.Guide1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, Guide2Property, state.SurfaceSignal.Guide2.nameID);
@@ -893,12 +888,19 @@ namespace LucentPath.Rendering
             cmd.SetComputeIntParam(compute, WidthProperty, state.Width);
             cmd.SetComputeIntParam(compute, HeightProperty, state.Height);
             cmd.SetComputeIntParam(compute, HasValidHistoryProperty, hasValidHistory ? 1 : 0);
+            var pathSettings = _pipelineResources.Asset.PathTracingSettings;
+            cmd.SetComputeIntParam(compute, SamplesPerPixelProperty, Mathf.Max(1, pathSettings.SamplesPerPixel));
+            cmd.SetComputeIntParam(compute, DebugVisualizationModeProperty, (int)pathSettings.DebugVisualizationMode);
             cmd.SetComputeFloatParam(compute, TaaFeedbackProperty, feedback);
             cmd.SetComputeTextureParam(compute, kernel, TaaCurrentColorProperty, current.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaPrevColorProperty, state.PrevResult.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaMotionGuideProperty, state.SurfaceSignal.Guide1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaPrevSurfaceGuideProperty, state.SurfaceSignal.PrevGuide1.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, ReflectionGuide1Property, state.ReflectionSignal.Guide1.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, ReflectionGuide2Property, state.ReflectionSignal.Guide2.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, FrameEmissionSumProperty, state.FrameEmissionSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, TaaOutputProperty, output.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, TaaHistoryOutputProperty, state.FilterPong.nameID);
 
             var groupsX = Mathf.CeilToInt(state.Width / 8f);
             var groupsY = Mathf.CeilToInt(state.Height / 8f);

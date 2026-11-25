@@ -41,6 +41,7 @@ namespace LucentPath.Rendering
             cmd.SetComputeTextureParam(compute, kernel, PreparedMotionVectorsProperty, state.PreparedMotionVectors.nameID);
             cmd.SetComputeTextureParam(compute, kernel, DlssSurfaceSignalProperty, surfaceDenoised.nameID);
             cmd.SetComputeTextureParam(compute, kernel, DlssReflectionSignalProperty, reflectionDenoised.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, FrameEmissionSumProperty, state.FrameEmissionSum.nameID);
             cmd.SetComputeTextureParam(compute, kernel, DlssTransmissionSignalProperty, transmissionDenoised.nameID);
             cmd.SetComputeTextureParam(compute, kernel, DlssTransparencyMaskProperty, state.DlssTransparencyMask.nameID);
             cmd.SetComputeTextureParam(compute, kernel, DlssBiasColorMaskProperty, state.DlssBiasColorMask.nameID);
