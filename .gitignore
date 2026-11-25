@@ -8,3 +8,19 @@ UserSettings/
 .vs/
 *.user
 __pycache__/
+
+# Local Unity diagnostics and build products
+MemoryCaptures/
+Recordings/
+NsightTrace*/
+*.ngfx-gputrace
+*.csproj
+*.sln
+*.slnx
+*.userprefs
+*.log
+/NativeBuild/
+/Assets/LucentPath/Plugins.meta
+/Assets/LucentPath/Plugins/
+/Assets/Plugins.meta
+/Assets/Plugins/
