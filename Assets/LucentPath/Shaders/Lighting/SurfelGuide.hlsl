@@ -54,16 +54,8 @@ float SurfelGuideTotalPower(uint n)
     return total;
 }
 
-float EvaluateSurfelGuidePdf(float3 p, float3 dir)
+float EvaluateSurfelGuidePdf(float3 p, float3 dir, uint n, float total)
 {
-    uint n = SurfelGuideCandidateCount();
-    if (n == 0u)
-        return 0.0;
-
-    float total = SurfelGuideTotalPower(n);
-    if (total <= 0.0)
-        return 0.0;
-
     float conePdf = SurfelGuideConePdf();
     float pdf = 0.0;
     [loop]
@@ -79,16 +71,18 @@ float EvaluateSurfelGuidePdf(float3 p, float3 dir)
     return pdf;
 }
 
-bool SampleSurfelGuideDirection(float3 p, float uSelect, float2 uCone, out float3 dir, out float pdf)
+float EvaluateSurfelGuidePdf(float3 p, float3 dir)
+{
+    uint n = SurfelGuideCandidateCount();
+    float total = SurfelGuideTotalPower(n);
+    return total > 0.0 ? EvaluateSurfelGuidePdf(p, dir, n, total) : 0.0;
+}
+
+bool SampleSurfelGuideDirection(float3 p, float uSelect, float2 uCone, out float3 dir, out uint n, out float total)
 {
     dir = float3(0.0, 1.0, 0.0);
-    pdf = 0.0;
-
-    uint n = SurfelGuideCandidateCount();
-    if (n == 0u)
-        return false;
-
-    float total = SurfelGuideTotalPower(n);
+    n = SurfelGuideCandidateCount();
+    total = SurfelGuideTotalPower(n);
     if (total <= 0.0)
         return false;
 
@@ -109,6 +103,16 @@ bool SampleSurfelGuideDirection(float3 p, float uSelect, float2 uCone, out float
     float3 axis = SafeNormalize(_EmissiveSurfels[sel].positionPower.xyz - p, float3(0.0, 1.0, 0.0));
     float conePdf;
     dir = SampleSurfelCone(axis, uCone, conePdf);
+    return true;
+}
+
+bool SampleSurfelGuideDirection(float3 p, float uSelect, float2 uCone, out float3 dir, out float pdf)
+{
+    pdf = 0.0;
+    uint candidateCount;
+    float totalPower;
+    if (!SampleSurfelGuideDirection(p, uSelect, uCone, dir, candidateCount, totalPower))
+        return false;
     pdf = EvaluateSurfelGuidePdf(p, dir);
     return pdf > 0.0;
 }

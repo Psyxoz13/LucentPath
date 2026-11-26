@@ -998,21 +998,30 @@ void EstimateSurfelDirectLighting(
     float2 uCone = float2(UintToFloat01(Hash(candHash)), UintToFloat01(Hash(candHash ^ 0x68E31DA4u)));
 
     float3 dir;
+#if defined(LUCENT_PATH_SHADE_NEE_ONLY)
+    uint candidateCount;
+    float totalPower;
+    if (!SampleSurfelGuideDirection(surface.position, uSelect, uCone, dir, candidateCount, totalPower))
+        return;
+#else
     float guidePdf;
     if (!SampleSurfelGuideDirection(surface.position, uSelect, uCone, dir, guidePdf))
         return;
+#endif
 
     float cosTheta = abs(dot(surface.normal, dir));
     float terminator = GetDirectLightingTerminator(surface, dir);
     if (cosTheta <= 0.0 || terminator <= 0.0)
         return;
 
+#if !defined(LUCENT_PATH_SHADE_NEE_ONLY)
     float3 sF;
     float3 rF;
     float3 tF;
     BSDF_f_AllSignals(surface, frame, set, wo, dir, TRANSPORT_MODE_RADIANCE, sF, rF, tF);
     if (Max3(sF + rF + tF) <= 1e-8)
         return;
+#endif
 
     Ray surfelRay = SpawnRayFromSurface(surface.interaction, dir);
     uint hitInstance;
@@ -1023,6 +1032,18 @@ void EstimateSurfelDirectLighting(
     float3 radiance = SurfelGuideEmissionForInstance(surface.position, hitInstance);
     if (Max3(radiance) <= 1e-8)
         return;
+
+#if defined(LUCENT_PATH_SHADE_NEE_ONLY)
+    float3 sF;
+    float3 rF;
+    float3 tF;
+    BSDF_f_AllSignals(surface, frame, set, wo, dir, TRANSPORT_MODE_RADIANCE, sF, rF, tF);
+    if (Max3(sF + rF + tF) <= 1e-8)
+        return;
+    float guidePdf = EvaluateSurfelGuidePdf(surface.position, dir, candidateCount, totalPower);
+    if (guidePdf <= 0.0)
+        return;
+#endif
 
     float bsdfPdf = BSDF_PDF(surface, frame, set, wo, dir, BXDF_FLAG_ALL);
     float mis = PowerHeuristic(guidePdf, bsdfPdf);
@@ -1174,6 +1195,28 @@ float3 EstimateDirectLightingWithBSDF(uint2 pixel, SurfaceData surface, ShadingF
         {
             float cosTheta = abs(dot(surface.normal, envDir));
             float terminator = GetDirectLightingTerminator(surface, envDir);
+#if defined(LUCENT_PATH_SHADE_NEE_ONLY)
+            if (cosTheta > 0.0 && terminator > 0.0 && Max3(envRadiance) > 1e-8)
+            {
+                Ray envShadow = SpawnRayFromSurface(surface.interaction, envDir);
+                envShadow.maxDistance = _BounceMaxDistance;
+                uint envShadowSeed = GetBounceLightSeed(pathSample, bounce);
+                float3 transmittedWi;
+                float3 sourceAirOrigin;
+                float3 envTransmission = TraceShadowTransmission(pixel, envShadow, false, false, envShadowSeed, transmittedWi, sourceAirOrigin);
+                if (Max3(envTransmission) > 1e-6)
+                {
+                    float3 envF;
+                    float envBsdfPdf;
+                    BSDF_f_and_PDF(surface, frame, set, wo, envDir, TRANSPORT_MODE_RADIANCE, BXDF_FLAG_ALL, envF, envBsdfPdf);
+                    if (Max3(envF) > 1e-8)
+                    {
+                        float envMis = PowerHeuristic(envPdf, envBsdfPdf);
+                        result += envF * envRadiance * cosTheta * envTransmission * terminator * envMis / max(envPdf, 1e-6);
+                    }
+                }
+            }
+#else
             if (cosTheta > 0.0 && terminator > 0.0)
             {
                 float3 envF = BSDF_f(surface, frame, set, wo, envDir, TRANSPORT_MODE_RADIANCE, BXDF_FLAG_ALL);
@@ -1193,6 +1236,7 @@ float3 EstimateDirectLightingWithBSDF(uint2 pixel, SurfaceData surface, ShadingF
                     }
                 }
             }
+#endif
         }
     }
 
@@ -1278,6 +1322,33 @@ void EstimateDirectLightingSplitWithBSDF(
         {
             float cosTheta = abs(dot(surface.normal, envDir));
             float terminator = GetDirectLightingTerminator(surface, envDir);
+#if defined(LUCENT_PATH_SHADE_NEE_ONLY)
+            if (cosTheta > 0.0 && terminator > 0.0 && Max3(envRadiance) > 1e-8)
+            {
+                Ray envShadow = SpawnRayFromSurface(surface.interaction, envDir);
+                envShadow.maxDistance = _BounceMaxDistance;
+                uint envShadowSeed = GetBounceLightSeed(pathSample, bounce);
+                float3 transmittedWi;
+                float3 sourceAirOrigin;
+                float3 envTransmission = TraceShadowTransmission(pixel, envShadow, false, false, envShadowSeed, transmittedWi, sourceAirOrigin);
+                if (Max3(envTransmission) > 1e-6)
+                {
+                    float3 envSurfaceF;
+                    float3 envReflectionF;
+                    float3 envTransmissionF;
+                    BSDF_f_AllSignals(surface, frame, set, wo, envDir, TRANSPORT_MODE_RADIANCE, envSurfaceF, envReflectionF, envTransmissionF);
+                    if (Max3(envSurfaceF + envReflectionF + envTransmissionF) > 1e-8)
+                    {
+                        float envBsdfPdf = BSDF_PDF(surface, frame, set, wo, envDir, BXDF_FLAG_ALL);
+                        float envMis = PowerHeuristic(envPdf, envBsdfPdf);
+                        float3 envBase = envRadiance * cosTheta * envTransmission * terminator * envMis / max(envPdf, 1e-6);
+                        surfaceContribution += envSurfaceF * envBase;
+                        reflectionContribution += envReflectionF * envBase;
+                        transmissionContribution += envTransmissionF * envBase;
+                    }
+                }
+            }
+#else
             if (cosTheta > 0.0 && terminator > 0.0 && Max3(envRadiance) > 1e-8)
             {
                 float3 envSurfaceF;
@@ -1304,6 +1375,7 @@ void EstimateDirectLightingSplitWithBSDF(
                     }
                 }
             }
+#endif
         }
     }
 
