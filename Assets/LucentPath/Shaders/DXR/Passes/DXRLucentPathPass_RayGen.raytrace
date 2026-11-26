@@ -337,7 +337,7 @@ void DxrStorePrimaryReflectionGuide(uint2 pixel, Ray guideRay, SurfaceData guide
     uint historyVersion = 0u;
     _ReflectionHitDistance[pixel] = max(reflectionHit.t, 1e-4);
     uint previousPositionValid = GetSurfaceHitPreviousPositionValid(reflectionSurfaceHit) ? 1u : 0u;
-    StoreSecondaryGuideEvent(pixel, PATH_SIGNAL_REFLECTION, reflectionRay, reflectionHit.t, reflectionSurface, stableId, historyVersion, GetSurfaceHitFlags(reflectionSurfaceHit), reflectionSurfaceHit.prevPosition, previousPositionValid, guideState);
+    StoreSecondaryGuideEvent(pixel, PATH_SIGNAL_REFLECTION, reflectionRay, reflectionHit.t, reflectionSurface, stableId, historyVersion, GetSurfaceHitFlags(reflectionSurfaceHit), reflectionSurfaceHit.prevPosition, previousPositionValid, guideState, 0u);
 }
 
 void DxrApplyPrimaryReflectionSkySplit(uint2 pixel, Ray ray, SurfaceData surface, inout PathState state)
@@ -562,7 +562,7 @@ void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray
         SetPathActive(state, false);
 }
 
-void DxrResolveDeltaTransmissionToSky(uint2 pixel, SurfaceData surface, inout PathState state)
+void DxrResolveRearReflectionExit(uint2 pixel, uint pathIndex, SurfaceData surface, inout PathState state)
 {
     if (_PathPlane != PATH_PLANE_SECOND_DELTA_REFLECTION || state.depth != 2u ||
         state.depth >= state.maxBouncesForPath || GetPathSignalKind(state) != PATH_SIGNAL_REFLECTION ||
@@ -586,7 +586,16 @@ void DxrResolveDeltaTransmissionToSky(uint2 pixel, SurfaceData surface, inout Pa
 
     RayPayload payload = TraceScene(skyRay.origin, skyRay.direction, _SurfaceBias, max(skyRay.maxDistance, EPSILON), RAY_FLAG_NONE, 1u);
     if (GetRayPayloadHit(payload) != 0u)
+    {
+        GpuSurfaceHit receiverHit = UnpackHitPayload(payload, skyRay.origin, skyRay.direction);
+        SurfaceData receiver = GetSurface(receiverHit, skyRay);
+        float pathDistance = _PathDistances[pathIndex] + GetRayPayloadHitDistance(payload);
+        _ReflectionHitDistance[pixel] = pathDistance;
+        StoreSecondaryGuideEvent(pixel, PATH_SIGNAL_REFLECTION, skyRay, pathDistance, receiver, receiverHit.instanceId,
+            0u, GetSurfaceHitFlags(receiverHit) | LUCENT_PATH_SECONDARY_GUIDE_FLAG_PRIMARY_SKY, receiverHit.prevPosition, GetSurfaceHitPreviousPositionValid(receiverHit) ? 1u : 0u,
+            state, LUCENT_PATH_SECONDARY_GUIDE_RESERVED_REAR_REFLECTION);
         return;
+    }
 
     float lightDistance;
     float3 lightRadiance;
@@ -629,7 +638,7 @@ void DxrTraceAndResolveBounce(uint2 pixelIndex, uint pathIndex, inout PathState 
     uint stableId = surfaceHit.instanceId;
     uint historyVersion = 0u;
     ResolveSurfaceTerminal(pixelIndex, ray, surface, stableId, historyVersion, GetSurfaceHitFlags(surfaceHit), state);
-    DxrResolveDeltaTransmissionToSky(pixelIndex, surface, state);
+    DxrResolveRearReflectionExit(pixelIndex, pathIndex, surface, state);
 
     if (state.depth >= state.maxBouncesForPath)
         SetPathActive(state, false);
@@ -688,6 +697,7 @@ void TraceSecondDeltaVertex(uint pathIndex, inout PathState state)
 
     WriteMaterialCache(surfaceHit, GetRayPayloadGeometryIndex(payload));
     _HitGBuffer[pathIndex] = PackStoredHit(surfaceHit);
+    _PathDistances[pathIndex] = _PathDistances[pathIndex] + hit.t;
 }
 
 void StartSecondDeltaReflectionPlanePath(uint2 pixelIndex, uint pathIndex, inout PathState state)

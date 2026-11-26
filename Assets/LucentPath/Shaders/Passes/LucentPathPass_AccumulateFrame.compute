@@ -352,6 +352,7 @@ void CSBuildLightingAliases(
 
 #if defined(LUCENT_PATH_KERNEL_CHECKERBOARD_RESOLVE)
 #include "../LucentPathCheckerboard.hlsl"
+#include "../LucentPathCommon.hlsl"
 
 RWTexture2D<float4> _FrameSurfaceSignalSum;
 RWTexture2D<float4> _FrameReflectionSignalSum;
@@ -360,6 +361,7 @@ RWTexture2D<float4> _FrameShadowSum;
 Texture2D<float4> _Guide0;
 Texture2D<float4> _Guide1;
 Texture2D<float4> _Guide2;
+Texture2D<float4> _ReflectionGuide0;
 
 int _Width;
 int _Height;
@@ -401,6 +403,7 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
 
     float4 centerGuide0 = _Guide0.Load(int3(pixel, 0));
     float4 centerGuide1 = _Guide1.Load(int3(pixel, 0));
+    bool centerReflectionSky = IsSkyGuide(_ReflectionGuide0.Load(int3(pixel, 0)));
 
     float4 surfaceSum = 0.0;
     float4 sameSurfaceSum = 0.0;
@@ -409,6 +412,7 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
     float shadowSum = 0.0;
     float weightSum = 0.0;
     float sameSurfaceWeight = 0.0;
+    float reflectionWeight = 0.0;
 
     int radius = clamp(_CheckerboardReconstructionRadius, 1, 3);
     [loop]
@@ -440,7 +444,11 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
                 sameSurfaceSum += surfaceSample;
                 sameSurfaceWeight += 1.0;
             }
-            reflectionSum += _FrameReflectionSignalSum[samplePixel];
+            if (IsSkyGuide(_ReflectionGuide0.Load(int3(samplePixel, 0))) == centerReflectionSky)
+            {
+                reflectionSum += _FrameReflectionSignalSum[samplePixel];
+                reflectionWeight += 1.0;
+            }
             transmissionSum += _FrameTransmissionSignalSum[samplePixel];
             shadowSum += sampleShadowSums.r;
             weightSum += 1.0;
@@ -453,7 +461,8 @@ void CSCheckerboardResolve(uint3 id : SV_DispatchThreadID)
     float invWeight = 1.0 / weightSum;
     bool hasUnmixedReconstruction = sameSurfaceWeight > 0.0;
     _FrameSurfaceSignalSum[pixel] = hasUnmixedReconstruction ? sameSurfaceSum / sameSurfaceWeight : surfaceSum * invWeight;
-    _FrameReflectionSignalSum[pixel] = reflectionSum * invWeight;
+    if (reflectionWeight > 0.0)
+        _FrameReflectionSignalSum[pixel] = reflectionSum / reflectionWeight;
     _FrameTransmissionSignalSum[pixel] = transmissionSum * invWeight;
     float4 shadowSums = _FrameShadowSum[pixel];
     shadowSums.r = shadowSum * invWeight;

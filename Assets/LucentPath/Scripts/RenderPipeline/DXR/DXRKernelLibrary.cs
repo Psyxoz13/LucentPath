@@ -764,6 +764,7 @@ namespace LucentPath.Rendering
             cmd.SetComputeTextureParam(compute, kernel, Guide0Property, state.SurfaceSignal.Guide0.nameID);
             cmd.SetComputeTextureParam(compute, kernel, Guide1Property, state.SurfaceSignal.Guide1.nameID);
             cmd.SetComputeTextureParam(compute, kernel, Guide2Property, state.SurfaceSignal.Guide2.nameID);
+            cmd.SetComputeTextureParam(compute, kernel, ReflectionGuide0Property, state.ReflectionSignal.Guide0.nameID);
 
             DispatchCompute(cmd, _pipelineResources.CheckerboardResolve, Mathf.CeilToInt(state.Width / 16f), groupsY);
         }

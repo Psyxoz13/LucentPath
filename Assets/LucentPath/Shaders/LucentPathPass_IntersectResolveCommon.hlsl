@@ -2,8 +2,14 @@
 #define LUCENT_PATH_PASS_INTERSECT_RESOLVE_COMMON_INCLUDED
 
 #define LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY 2147483648u
+#define LUCENT_PATH_SECONDARY_GUIDE_FLAG_PRIMARY_SKY 1073741824u
 
 bool HasPrimarySkyReflectionGuide(uint2 pixel)
+{
+    return (_ReflectionGuideEvent3[pixel].z & (LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY | LUCENT_PATH_SECONDARY_GUIDE_FLAG_PRIMARY_SKY)) != 0u;
+}
+
+bool ReflectionGuideIsSky(uint2 pixel)
 {
     return (_ReflectionGuideEvent3[pixel].z & LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY) != 0u;
 }
@@ -335,7 +341,8 @@ void StoreSecondaryGuideEvent(
     uint flags,
     float3 previousWorldPosition,
     uint previousPositionValid,
-    PathState state)
+    PathState state,
+    uint reserved)
 {
     float secondaryHitDistance = max(hitDistance, 1e-4);
     bool reflectionSignal = signalKind == PATH_SIGNAL_REFLECTION;
@@ -356,7 +363,7 @@ void StoreSecondaryGuideEvent(
     eventData.roughness = saturate(state.guideRoughness);
     eventData.eta = ResolveMaterialIor(surface.eta);
     eventData.mediumState = IsInsideDielectricVolume(state) ? 1u : 0u;
-    eventData.reserved = 0u;
+    eventData.reserved = reserved;
     eventData.previousWorldPosition = eventData.worldPosition;
     if (previousPositionValid != 0u)
     {
@@ -394,7 +401,9 @@ void StoreSecondaryTerminalGuideEvent(
         return;
 
     bool reflectionSignal = signalKind == PATH_SIGNAL_REFLECTION;
-    if (reflectionSignal && _ReflectionHitDistance[pixel] > 0.0)
+    bool replaceSkyGuide = reflectionSignal && (flags & LUCENT_PATH_SECONDARY_GUIDE_FLAG_SKY) == 0u &&
+        ReflectionGuideIsSky(pixel);
+    if (reflectionSignal && _ReflectionHitDistance[pixel] > 0.0 && !replaceSkyGuide)
         return;
     if (!reflectionSignal && _TransmissionHitDistance[pixel] > 0.0)
         return;
@@ -412,7 +421,7 @@ void StoreSecondaryTerminalGuideEvent(
     eventData.stableId = stableId;
     eventData.historyVersion = 0u;
     eventData.pathKind = GetSecondaryGuidePathKind(signalKind);
-    eventData.flags = flags;
+    eventData.flags = replaceSkyGuide ? flags | LUCENT_PATH_SECONDARY_GUIDE_FLAG_PRIMARY_SKY : flags;
     eventData.roughness = saturate(state.guideRoughness);
     eventData.eta = 1.0;
     eventData.mediumState = IsInsideDielectricVolume(state) ? 1u : 0u;
@@ -467,19 +476,26 @@ void ResolveSurfaceTerminal(
     {
         uint signalKind = GetPathSignalKind(state);
         float secondarySegmentDistance = ResolveSecondarySegmentDistance(ray, surface.position);
-        if (signalKind == PATH_SIGNAL_REFLECTION && _ReflectionHitDistance[pixel] <= 0.0)
+        if (signalKind == PATH_SIGNAL_REFLECTION &&
+            (_ReflectionHitDistance[pixel] <= 0.0 || ReflectionGuideIsSky(pixel)))
         {
-            _ReflectionHitDistance[pixel] = secondarySegmentDistance;
+            bool replaceSkyGuide = ReflectionGuideIsSky(pixel);
+            float reflectionDistance = replaceSkyGuide
+                ? max(_PathDistances[GetPathIndex(pixel)], secondarySegmentDistance)
+                : secondarySegmentDistance;
+            _ReflectionHitDistance[pixel] = reflectionDistance;
             float3 previousWorldPosition;
             uint previousPositionValid = ResolveSecondaryPreviousWorldPosition(surface, previousWorldPosition);
-            StoreSecondaryGuideEvent(pixel, signalKind, ray, secondarySegmentDistance, surface, stableId, historyVersion, flags, previousWorldPosition, previousPositionValid, state);
+            uint reserved = _PathPlane == PATH_PLANE_SECOND_DELTA_REFLECTION ? LUCENT_PATH_SECONDARY_GUIDE_RESERVED_REAR_REFLECTION : 0u;
+            uint reflectionFlags = replaceSkyGuide ? flags | LUCENT_PATH_SECONDARY_GUIDE_FLAG_PRIMARY_SKY : flags;
+            StoreSecondaryGuideEvent(pixel, signalKind, ray, reflectionDistance, surface, stableId, historyVersion, reflectionFlags, previousWorldPosition, previousPositionValid, state, reserved);
         }
         else if (signalKind == PATH_SIGNAL_TRANSMISSION && _TransmissionHitDistance[pixel] <= 0.0)
         {
             _TransmissionHitDistance[pixel] = secondarySegmentDistance;
             float3 previousWorldPosition;
             uint previousPositionValid = ResolveSecondaryPreviousWorldPosition(surface, previousWorldPosition);
-            StoreSecondaryGuideEvent(pixel, signalKind, ray, secondarySegmentDistance, surface, stableId, historyVersion, flags, previousWorldPosition, previousPositionValid, state);
+            StoreSecondaryGuideEvent(pixel, signalKind, ray, secondarySegmentDistance, surface, stableId, historyVersion, flags, previousWorldPosition, previousPositionValid, state, 0u);
         }
     }
 }

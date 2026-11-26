@@ -332,7 +332,10 @@ SecondaryGuideSample ResolveSecondaryMakeGuide(uint2 pixel, GpuSecondaryGuideEve
 
     SecondaryGuideSample guide;
     guide.guide0 = float4(SafeNormalize(currentEvent.worldNormalOrDirection, float3(0.0, 1.0, 0.0)), skyEvent ? -1.0 : currentDepth);
-    guide.guide1 = float4(currentUv - prevUv, (float)currentEvent.stableId, (float)currentEvent.historyVersion);
+    float historyIdentity = reflectionChannel
+        ? (float)(currentEvent.reserved & LUCENT_PATH_SECONDARY_GUIDE_RESERVED_REAR_REFLECTION)
+        : (float)currentEvent.historyVersion;
+    guide.guide1 = float4(currentUv - prevUv, (float)currentEvent.stableId, historyIdentity);
     guide.guide2 = reflectionChannel
         ? float4((float)currentEvent.pathKind, saturate(currentEvent.roughness), _Guide1.Load(int3(pixel, 0)).z, expectedPrevDepth - currentDepth)
         : float4((float)currentEvent.pathKind, max(currentEvent.eta, 1.0), (float)currentEvent.mediumState, expectedPrevDepth - currentDepth);
