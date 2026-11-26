@@ -1,6 +1,7 @@
 #pragma kernel CSShadeNee LUCENT_PATH_SHADE_NEE_ONLY
 #pragma kernel CSShadeAdvance LUCENT_PATH_SHADE_ADVANCE_ONLY
 #pragma multi_compile _ LUCENT_SHADE_SIMPLE
+#pragma multi_compile_local _ LUCENT_NEE_SINGLE_ANALYTIC
 #pragma require inlineraytracing
 #pragma only_renderers d3d11 metal vulkan
 #define LUCENT_DXR_ONLY 1
@@ -65,9 +66,10 @@ void CSShadeNee(uint3 id : SV_DispatchThreadID)
     if (!ResolveShadePath(id, pathIndex, pixel))
         return;
 
-    PathState state = UnpackPathState(_PathStates[pathIndex]);
-    if (!IsPathActive(state))
+    if (_UseCompactPaths == 0 && !HasActivePath(pathIndex))
         return;
+
+    PathState state = UnpackPathState(_PathStates[pathIndex]);
 
     GpuSurfaceHit surfaceHit = UnpackStoredHit(_HitGBuffer[pathIndex]);
     Hit hit = CreateEmptyHit();
@@ -86,9 +88,10 @@ void CSShadeAdvance(uint3 id : SV_DispatchThreadID)
     if (!ResolveShadePath(id, pathIndex, pixel))
         return;
 
-    PathState state = UnpackPathState(_PathStates[pathIndex]);
-    if (!IsPathActive(state))
+    if (_UseCompactPaths == 0 && !HasActivePath(pathIndex))
         return;
+
+    PathState state = UnpackPathState(_PathStates[pathIndex]);
 
     GpuSurfaceHit surfaceHit = UnpackStoredHit(_HitGBuffer[pathIndex]);
     Hit hit = CreateEmptyHit();
@@ -96,7 +99,6 @@ void CSShadeAdvance(uint3 id : SV_DispatchThreadID)
     hit.t = surfaceHit.t;
 
     LightAdvanceBody(pixel, state, hit, surfaceHit);
-    _PathStates[pathIndex] = PackPathState(state);
-    _PathFlags[pathIndex] = state.flags;
+    StorePathState(pathIndex, state);
 }
 #endif

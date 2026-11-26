@@ -435,15 +435,15 @@ float ComputeSurfaceSpatialBootstrapGuideWeight(
     if (centerSky != sampleSky || !SamePathChain(centerGuide2, sampleGuide2))
         return 0.0;
 
+    if (!centerSky && !SameSurfaceIdentity(centerGuide1, sampleGuide1))
+        return 0.0;
+
     float normalAgreement = dot(SafeNormalize(centerGuide0.xyz), SafeNormalize(sampleGuide0.xyz));
     if (normalAgreement < _SpatialBootstrapNormalThreshold)
         return 0.0;
 
     if (centerSky)
         return pow(saturate(normalAgreement), _SpatialBootstrapNormalPhi);
-
-    if (!SameSurfaceIdentity(centerGuide1, sampleGuide1))
-        return 0.0;
 
     float centerDepth = max(centerGuide0.w, 1e-4);
     float sampleDepth = max(sampleGuide0.w, 1e-4);
@@ -1042,9 +1042,18 @@ bool ResolveSignalHistory(
     if (_HasValidHistory == 0)
         return false;
 
+    bool skyHistory = IsSkyGuide(currentGuide0);
+    if (guideKind == SIGNAL_GUIDE_REFLECTION &&
+        (!(abs(currentGuide2.x - GUIDE_PATH_KIND_SPECULAR) < 0.5) ||
+         !HasValidSecondaryIdentity(currentGuide1)))
+        return false;
+    if (guideKind == SIGNAL_GUIDE_TRANSMISSION &&
+        (!(abs(currentGuide2.x - GUIDE_PATH_KIND_TRANSMISSION) < 0.5) ||
+         (!skyHistory && !HasValidSecondaryIdentity(currentGuide1))))
+        return false;
+
     float2 currentUv = GetCurrentUv(pixel);
     float2 historyUv = GetHistoryUv(currentUv, currentGuide1.xy);
-    bool skyHistory = IsSkyGuide(currentGuide0);
     if (!IsUvInsideHistory(historyUv))
     {
         if (!skyHistory || guideKind == SIGNAL_GUIDE_REFLECTION)

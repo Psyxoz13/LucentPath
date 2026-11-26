@@ -312,6 +312,9 @@ namespace LucentPath.Rendering
 
                 if (shadeActive)
                 {
+                    var singleAnalyticCandidate = new LocalKeyword(_resources.ShadeNee.Compute, "LUCENT_NEE_SINGLE_ANALYTIC");
+                    cmd.SetKeyword(_resources.ShadeNee.Compute, singleAnalyticCandidate,
+                        _resources.Asset.PathTracingSettings.LightNeeRisCandidates <= 1);
                     _kernels.BindPathTracingResources(cmd, state, _resources.ShadeNee);
                     _kernels.BindPathTracingResources(cmd, state, _resources.ShadeAdvance);
                     cmd.SetComputeIntParam(_resources.ShadeNee.Compute, ShadeDispatchStrideProperty, shadeDispatchStride);
@@ -544,7 +547,7 @@ namespace LucentPath.Rendering
 
                 if (compactActive)
                 {
-                    DispatchPathCompaction(cmd, groupsX, groupsY);
+                    // Advance may retire paths from this list. RayGenMain tests their live flags.
                     cmd.SetRayTracingIntParam(shader, UseCompactPathsProperty, 1);
                     cmd.DispatchRays(shader, "RayGenMain", state.DispatchArgsBuffer, 0);
                 }
@@ -563,6 +566,13 @@ namespace LucentPath.Rendering
 
                 cmd.BeginSample(_bounceShadeMarker);
                 cmd.SetComputeIntParam(_resources.ShadeAdvance.Compute, CurrentSampleIndexProperty, currentSampleIndex);
+
+                if (compactActive)
+                {
+                    // Classify the hit produced by this intersection.
+                    DispatchPathCompaction(cmd, groupsX, groupsY);
+                }
+
                 DispatchShadeBuckets(cmd, state, compactActive, shadeGroupsX, shadeGroupsY);
                 cmd.EndSample(_bounceShadeMarker);
             }

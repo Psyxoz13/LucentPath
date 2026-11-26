@@ -118,10 +118,11 @@ PathState UnpackPathState(PackedPathState packed)
 #if defined(LUCENT_PATH_NEEDS_PATH_STATE_BUFFERS)
 #if defined(LUCENT_PATH_SHADE_NEE_ONLY)
 StructuredBuffer<PackedPathState> _PathStates;
+StructuredBuffer<uint> _PathFlags;
 #else
 RWStructuredBuffer<PackedPathState> _PathStates;
-#endif
 RWStructuredBuffer<uint> _PathFlags;
+#endif
 #if defined(LUCENT_PATH_DXR_MERGED)
 #elif defined(LUCENT_PATH_KERNEL_DIRECT_LIGHTING)
 StructuredBuffer<Hit> _PathHits;
@@ -245,6 +246,23 @@ bool IsPathActive(PathState state)
 {
     return (state.flags & PATH_FLAG_ACTIVE) != 0u;
 }
+
+#if defined(LUCENT_PATH_NEEDS_PATH_STATE_BUFFERS)
+bool HasActivePath(uint pathIndex)
+{
+    return (_PathFlags[pathIndex] & PATH_FLAG_ACTIVE) != 0u;
+}
+
+#if !defined(LUCENT_PATH_SHADE_NEE_ONLY)
+void StorePathState(uint pathIndex, PathState state)
+{
+    // Later dispatches use the flags to reject inactive paths before reading the packed state.
+    if (IsPathActive(state))
+        _PathStates[pathIndex] = PackPathState(state);
+    _PathFlags[pathIndex] = state.flags;
+}
+#endif
+#endif
 
 bool IsInsideDielectricVolume(PathState state)
 {

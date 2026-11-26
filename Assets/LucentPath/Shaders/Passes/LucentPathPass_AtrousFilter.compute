@@ -225,6 +225,12 @@ void CSHistoryFix(uint3 id : SV_DispatchThreadID)
     }
 
     float4 centerGuide0 = _Guide0.Load(int3(pixel, 0));
+    if (ATROUS_SIGNAL_KIND == 1 && IsSkyGuide(centerGuide0))
+    {
+        _HistoryFixOutput[pixel] = centerColor;
+        return;
+    }
+
     float4 centerGuide1 = _Guide1.Load(int3(pixel, 0));
     float centerHitDistance = _HistoryFixHitDistance.Load(int3(pixel, 0));
     float centerRoughness = HistoryFixPrimaryRoughness(pixel, centerGuide2);
@@ -249,7 +255,10 @@ void CSHistoryFix(uint3 id : SV_DispatchThreadID)
                 continue;
 
             uint2 samplePixel = uint2(samplePixelInt);
-            float4 sampleColor = _HistoryFixInput.Load(int3(samplePixel, 0));
+            float4 sampleColor = 0.0;
+            if (ATROUS_SIGNAL_KIND == 2)
+                sampleColor = _HistoryFixInput.Load(int3(samplePixel, 0));
+
             float guideWeight = HistoryFixGuideWeight(
                 pixel,
                 samplePixel,
@@ -262,6 +271,9 @@ void CSHistoryFix(uint3 id : SV_DispatchThreadID)
                 sampleColor);
             if (guideWeight <= 1e-5)
                 continue;
+
+            if (ATROUS_SIGNAL_KIND != 2)
+                sampleColor = _HistoryFixInput.Load(int3(samplePixel, 0));
 
             float spatialDistance = length(float2(x, y)) / max((float)radius, 1.0);
             float spatialWeight = exp(-spatialDistance * spatialDistance * 2.0);

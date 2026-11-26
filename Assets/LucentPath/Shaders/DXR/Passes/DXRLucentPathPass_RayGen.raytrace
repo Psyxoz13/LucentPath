@@ -504,7 +504,8 @@ void DxrResolvePath(uint2 pixelIndex, uint pathIndex, inout PathState state, Ray
     if (hit.didHit != 0u)
     {
         WriteMaterialCache(surfaceHit, GetRayPayloadGeometryIndex(payload));
-        _HitGBuffer[pathIndex] = PackStoredHit(surfaceHit);
+        if (shadeThisFrame)
+            _HitGBuffer[pathIndex] = PackStoredHit(surfaceHit);
         surface = GetSurface(surfaceHit, ray);
     }
 
@@ -778,8 +779,7 @@ void RayGenPrimarySample()
     Hit hit;
     GpuSurfaceHit surfaceHit;
     DxrResolvePath(pixelIndex, pathIndex, state, ray, payload, hit, surfaceHit, shadeThisFrame);
-    _PathStates[pathIndex] = PackPathState(state);
-    _PathFlags[pathIndex] = state.flags;
+    StorePathState(pathIndex, state);
 }
 
 [shader("raygeneration")]
@@ -790,8 +790,7 @@ void RayGenDeltaReflectionPlane()
 
     PathState state = DxrCreateInitialPathState(pixelIndex, pathIndex);
     StartDeltaReflectionPlanePath(pixelIndex, pathIndex, state);
-    _PathStates[pathIndex] = PackPathState(state);
-    _PathFlags[pathIndex] = state.flags;
+    StorePathState(pathIndex, state);
 }
 
 [shader("raygeneration")]
@@ -802,8 +801,7 @@ void RayGenSecondDeltaReflectionPlane()
 
     PathState state = DxrCreateInitialPathState(pixelIndex, pathIndex);
     StartSecondDeltaReflectionPlanePath(pixelIndex, pathIndex, state);
-    _PathStates[pathIndex] = PackPathState(state);
-    _PathFlags[pathIndex] = state.flags;
+    StorePathState(pathIndex, state);
 }
 
 [shader("raygeneration")]
@@ -825,15 +823,15 @@ void RayGenMain()
         pathIndex = GetPathIndex(pixelIndex);
     }
 
-    PathState state = UnpackPathState(_PathStates[pathIndex]);
-    if (!IsPathActive(state))
+    if (!HasActivePath(pathIndex))
         return;
+
+    PathState state = UnpackPathState(_PathStates[pathIndex]);
 
     Hit hit;
     GpuSurfaceHit surfaceHit;
     DxrTraceAndResolveBounce(pixelIndex, pathIndex, state, hit, surfaceHit);
-    _PathStates[pathIndex] = PackPathState(state);
-    _PathFlags[pathIndex] = state.flags;
+    StorePathState(pathIndex, state);
 }
 
 [shader("miss")]
