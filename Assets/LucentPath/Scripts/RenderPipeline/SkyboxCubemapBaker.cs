@@ -1,6 +1,10 @@
 using UnityEngine;
 using UnityEngine.Rendering;
 
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
 namespace LucentPath.Rendering
 {
     internal class SkyboxCubemapBaker : System.IDisposable
@@ -135,12 +139,19 @@ namespace LucentPath.Rendering
                 return;
             }
 
+#if UNITY_EDITOR
+            ShaderUtil.SetAsyncCompilation(cmd, false);
+#endif
             for (int face = 0; face < 6; face++)
             {
                 cmd.SetRenderTarget(_cubemap, 0, (CubemapFace)face);
                 cmd.SetViewProjectionMatrices(_faceViewMatrices[face], _faceProj);
                 cmd.DrawMesh(_cubeMesh, Matrix4x4.identity, sky, 0, 0);
             }
+
+#if UNITY_EDITOR
+            ShaderUtil.RestoreAsyncCompilation(cmd);
+#endif
 
             cmd.GenerateMips(_cubemap);
             cmd.SetViewProjectionMatrices(restoreView, restoreProjection);
