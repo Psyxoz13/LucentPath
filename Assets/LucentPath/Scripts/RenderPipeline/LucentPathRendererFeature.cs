@@ -20,11 +20,14 @@ namespace LucentPath.Rendering
             SubscribeToSettings(Settings);
 
             _renderPass ??= new LucentPathRenderPass();
+            _renderPass.RestorePendingSkyboxes();
 
             RenderPipelineManager.beginContextRendering -= OnRenderPipelineManagerBeginContextRendering;
             RenderPipelineManager.endContextRendering -= OnRenderPipelineManagerEndContextRendering;
+            RenderPipelineManager.endCameraRendering -= OnRenderPipelineManagerEndCameraRendering;
             RenderPipelineManager.beginContextRendering += OnRenderPipelineManagerBeginContextRendering;
             RenderPipelineManager.endContextRendering += OnRenderPipelineManagerEndContextRendering;
+            RenderPipelineManager.endCameraRendering += OnRenderPipelineManagerEndCameraRendering;
         }
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
@@ -43,13 +46,22 @@ namespace LucentPath.Rendering
 
             _renderPass.SetRenderer(lucentPathRenderer);
             renderer.EnqueuePass(_renderPass);
+
+            renderingData.cameraData.requiresDepthTexture = false;
+            renderingData.cameraData.requiresOpaqueTexture = false;
+            if (renderingData.cameraData.renderType == CameraRenderType.Base)
+            {
+                _renderPass.SuppressCameraSkybox(renderingData.cameraData.camera);
+            }
         }
 
         protected override void Dispose(bool disposing)
         {
             RenderPipelineManager.beginContextRendering -= OnRenderPipelineManagerBeginContextRendering;
             RenderPipelineManager.endContextRendering -= OnRenderPipelineManagerEndContextRendering;
+            RenderPipelineManager.endCameraRendering -= OnRenderPipelineManagerEndCameraRendering;
 
+            _renderPass?.RestorePendingSkyboxes();
             SubscribeToSettings(null);
             DisposeRenderer();
         }
@@ -133,6 +145,11 @@ namespace LucentPath.Rendering
         private void OnRenderPipelineManagerEndContextRendering(ScriptableRenderContext context, List<Camera> cameras)
         {
             _renderer?.EndFrame();
+        }
+
+        private void OnRenderPipelineManagerEndCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            _renderPass?.RestoreCameraSkybox(camera);
         }
     }
 }
